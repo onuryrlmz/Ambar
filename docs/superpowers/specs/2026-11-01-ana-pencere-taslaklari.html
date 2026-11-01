@@ -1,0 +1,140 @@
+<style>
+  .w { font: 12px/1.35 -apple-system, "Segoe UI", sans-serif; border-radius: 6px; overflow: hidden; border: 1px solid #8a8a8a; text-align: left; }
+  .w table { width: 100%; border-collapse: collapse; }
+  .w th, .w td { padding: 3px 8px; text-align: left; white-space: nowrap; font-weight: normal; }
+  .w td.n, .w th.n { text-align: right; }
+
+  /* A: klasik */
+  .a { background: #f0f0f0; color: #111; }
+  .a .menu { padding: 3px 8px; background: #fafafa; border-bottom: 1px solid #ddd; }
+  .a .tools { display: flex; gap: 2px; padding: 6px; border-bottom: 1px solid #bbb; background: linear-gradient(#fcfcfc, #e6e6e6); }
+  .a .tool { width: 50px; text-align: center; font-size: 10px; color: #222; }
+  .a .tool b { display: block; font-size: 19px; font-weight: normal; line-height: 25px; }
+  .a .path { padding: 4px 8px; background: #fff; border-bottom: 1px solid #bbb; }
+  .a .list { background: #fff; }
+  .a th { background: #efefef; border-right: 1px solid #ccc; border-bottom: 1px solid #bbb; }
+  .a tr.sel td { background: #0a64d8; color: #fff; }
+  .a .status { display: flex; justify-content: space-between; padding: 3px 8px; background: #efefef; border-top: 1px solid #bbb; font-size: 11px; }
+
+  /* B: modern */
+  .b { background: #1e1f24; color: #e7e7ea; }
+  .b .top { display: flex; align-items: center; gap: 6px; padding: 8px; background: #26272d; border-bottom: 1px solid #36373e; }
+  .b .btn { padding: 4px 9px; border-radius: 5px; background: #33343b; font-size: 11px; }
+  .b .btn.p { background: #5b6cff; color: #fff; }
+  .b .crumb { padding: 6px 10px; color: #a4a5ad; border-bottom: 1px solid #2d2e34; }
+  .b .body { display: flex; }
+  .b .tree { width: 112px; flex: none; padding: 8px; background: #222329; border-right: 1px solid #2d2e34; color: #b9bac2; line-height: 1.9; }
+  .b .tree .on { color: #fff; background: #33343b; border-radius: 4px; padding: 0 5px; margin: 0 -5px; }
+  .b .main { flex: 1; min-width: 0; }
+  .b th { color: #8a8b94; font-size: 11px; border-bottom: 1px solid #2d2e34; }
+  .b tr.sel td { background: #343a6b; }
+  .b .status { padding: 5px 10px; color: #8a8b94; border-top: 1px solid #2d2e34; font-size: 11px; }
+
+  /* C: cift panel */
+  .c { background: #f5f5f7; color: #1b1b1f; }
+  .c .top { display: flex; gap: 6px; padding: 7px; background: #fff; border-bottom: 1px solid #ddd; }
+  .c .btn { padding: 4px 9px; border-radius: 5px; background: #ececf0; font-size: 11px; }
+  .c .panes { display: flex; }
+  .c .pane { flex: 1; min-width: 0; background: #fff; }
+  .c .pane + .pane { border-left: 1px solid #ccc; }
+  .c .ph { padding: 5px 8px; background: #e9e9ee; font-size: 11px; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .c tr.sel td { background: #d7e6ff; }
+  .c td { padding: 3px 6px; }
+  .c .status { padding: 4px 8px; font-size: 11px; color: #666; border-top: 1px solid #ddd; }
+  .card-image { padding: 10px; }
+</style>
+
+<h2>Ana pencere nasıl görünsün?</h2>
+<p class="subtitle">Üçünde de özellikler aynı, fark görünüşte ve düzende. Birini seç, beğendiğin parçaları karıştırmak istersen terminalde yaz.</p>
+
+<div class="cards">
+  <div class="card" data-choice="klasik" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="w a">
+        <div class="menu">Dosya &nbsp; Komutlar &nbsp; Araçlar &nbsp; Sık Kullanılanlar &nbsp; Seçenekler &nbsp; Yardım</div>
+        <div class="tools">
+          <div class="tool"><b>📦</b>Ekle</div>
+          <div class="tool"><b>📤</b>Çıkart</div>
+          <div class="tool"><b>🧪</b>Sına</div>
+          <div class="tool"><b>👁</b>Göster</div>
+          <div class="tool"><b>🗑</b>Sil</div>
+          <div class="tool"><b>🩹</b>Onar</div>
+        </div>
+        <div class="path">📦 proje-yedek.rar\belgeler</div>
+        <div class="list"><table>
+          <tr><th>Ad</th><th class="n">Boyut</th><th class="n">Sıkışık</th><th>Değiştirilme</th></tr>
+          <tr><td>📁 ..</td><td></td><td></td><td></td></tr>
+          <tr><td>📁 faturalar</td><td class="n">48 MB</td><td class="n">31 MB</td><td>12.10.2026</td></tr>
+          <tr class="sel"><td>📄 rapor.pdf</td><td class="n">2,4 MB</td><td class="n">1,9 MB</td><td>28.10.2026</td></tr>
+          <tr><td>📄 notlar.txt</td><td class="n">14 KB</td><td class="n">5 KB</td><td>30.10.2026</td></tr>
+        </table></div>
+        <div class="status"><span>1 dosya seçili, 2,4 MB</span><span>🔒 Şifreli · RAR5</span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Klasik WinRAR</h3>
+      <p>Menü, büyük simgeli araç çubuğu ve tek liste. Windows'taki WinRAR'a en yakını, alışkanlıkların aynen geçer.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="modern" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="w b">
+        <div class="top">
+          <span class="btn p">Çıkart</span><span class="btn">Ekle</span><span class="btn">Sına</span><span class="btn">Onar</span><span class="btn">Sil</span>
+        </div>
+        <div class="crumb">proje-yedek.rar › belgeler</div>
+        <div class="body">
+          <div class="tree">
+            📦 proje-yedek<br>
+            &nbsp;<span class="on">📁 belgeler</span><br>
+            &nbsp;&nbsp;📁 faturalar<br>
+            &nbsp;📁 resimler
+          </div>
+          <div class="main"><table>
+            <tr><th>Ad</th><th class="n">Boyut</th><th>Tarih</th></tr>
+            <tr><td>📁 faturalar</td><td class="n">48 MB</td><td>12.10.26</td></tr>
+            <tr class="sel"><td>📄 rapor.pdf</td><td class="n">2,4 MB</td><td>28.10.26</td></tr>
+            <tr><td>📄 notlar.txt</td><td class="n">14 KB</td><td>30.10.26</td></tr>
+          </table></div>
+        </div>
+        <div class="status">1 dosya seçili, 2,4 MB · 🔒 Şifreli · RAR5</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Modern WinRAR</h3>
+      <p>Aynı işleyiş ama sade: koyu tema, solda klasör ağacı, küçük düğmeler. WinRAR mantığı kalır, 90'lar görünümü gider.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="cift-panel" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="w c">
+        <div class="top"><span class="btn">Ekle →</span><span class="btn">← Çıkart</span><span class="btn">Sına</span><span class="btn">Onar</span></div>
+        <div class="panes">
+          <div class="pane">
+            <div class="ph">💻 ~/Masaüstü</div>
+            <table>
+              <tr><td>📁 yedekler</td><td class="n">1,2 GB</td></tr>
+              <tr class="sel"><td>📄 sunum.key</td><td class="n">84 MB</td></tr>
+              <tr><td>📄 liste.xlsx</td><td class="n">96 KB</td></tr>
+            </table>
+          </div>
+          <div class="pane">
+            <div class="ph">📦 proje-yedek.rar › belgeler</div>
+            <table>
+              <tr><td>📁 faturalar</td><td class="n">48 MB</td></tr>
+              <tr><td>📄 rapor.pdf</td><td class="n">2,4 MB</td></tr>
+              <tr><td>📄 notlar.txt</td><td class="n">14 KB</td></tr>
+            </table>
+          </div>
+        </div>
+        <div class="status">🔒 Şifreli · RAR5 · 3 öğe</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Çift panel</h3>
+      <p>Solda bilgisayarın, sağda arşiv. Dosyaları iki panel arasında sürükleyip atarsın. Liman'daki çift panelli SFTP'ye benzer, WinRAR'dan farklıdır.</p>
+    </div>
+  </div>
+</div>
