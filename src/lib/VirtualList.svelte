@@ -1,5 +1,5 @@
 <script lang="ts" generics="T">
-  import type { Snippet } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import { visibleRange } from "./virtual.ts";
 
   let {
@@ -8,12 +8,15 @@
     row,
     onScroll,
     overscan = 8,
+    keepScroll = false,
   }: {
     items: T[];
     rowHeight: number;
     row: Snippet<[T, number]>;
     onScroll?: (scrollTop: number) => void;
     overscan?: number;
+    /** Keep the scroll position when `items` changes (re-sort of the same folder). */
+    keepScroll?: boolean;
   } = $props();
 
   let el: HTMLDivElement | undefined = $state();
@@ -22,6 +25,16 @@
 
   const range = $derived(visibleRange(scrollTop, viewportH, rowHeight, items.length, overscan));
   const slice = $derived(items.slice(range.start, range.end));
+
+  let prevItems: T[] | undefined;
+  $effect(() => {
+    const cur = items;
+    if (prevItems !== undefined && cur !== prevItems && !untrack(() => keepScroll)) {
+      if (el) el.scrollTop = 0;
+      scrollTop = 0;
+    }
+    prevItems = cur;
+  });
 
   function handleScroll() {
     if (!el) return;

@@ -86,3 +86,35 @@ test("100k entries index under 500 ms and childrenOf under 50 ms", () => {
   assert.ok(build < 500, `build ${build}`);
   assert.ok(q < 50, `children ${q}`);
 });
+
+test("long slash run does not freeze normalization", () => {
+  const t0 = performance.now();
+  const idx = buildIndex([f("a/" + "/".repeat(200000) + "x", 4), f("b" + "/".repeat(200000), 1)]);
+  assert.ok(performance.now() - t0 < 2000);
+  const names = childrenOf(idx, "").map((n) => n.name).sort();
+  assert.equal(names.length, 2);
+  assert.ok(names.includes("b"));
+});
+
+test("entry with more than 512 segments is one root-level node with full path", () => {
+  const deep = Array.from({ length: 100000 }, () => "d").join("/") + "/f.txt";
+  const t0 = performance.now();
+  const idx = buildIndex([f(deep, 7), f("ok/x.txt", 1)]);
+  assert.ok(performance.now() - t0 < 2000);
+  const root = childrenOf(idx, "");
+  const node = root.find((n) => n.path === deep);
+  assert.ok(node);
+  assert.equal(node.name, deep);
+  assert.equal(node.size, 7);
+  assert.equal(root.length, 2);
+  assert.deepEqual(descendantPaths(idx, [deep]), [deep]);
+});
+
+test("__proto__ and constructor segments are plain names", () => {
+  const idx = buildIndex([f("__proto__/constructor/x.txt", 2), f("__proto__", 1), f("hasOwnProperty/y", 3)]);
+  const root = childrenOf(idx, "");
+  assert.equal(root.filter((n) => n.name === "__proto__").length, 2);
+  assert.equal(childrenOf(idx, "__proto__")[0].name, "constructor");
+  assert.equal(childrenOf(idx, "__proto__/constructor")[0].size, 2);
+  assert.equal(({}).polluted, undefined);
+});

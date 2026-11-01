@@ -7,7 +7,8 @@ export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0 B";
   let i = 0;
   let v = n;
-  while (v >= 1024 && i < UNITS.length - 1) {
+  // Compare the rounded value so 1048575 becomes "1 MB", not "1024 KB".
+  while (Math.round(v * 10) / 10 >= 1024 && i < UNITS.length - 1) {
     v /= 1024;
     i++;
   }

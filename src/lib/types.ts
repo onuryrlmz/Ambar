@@ -106,5 +106,5 @@ export interface TreeNode {
   crc: number | null;
 }
 
-export type SortKey = "name" | "size" | "packed" | "modified";
+export type SortKey = "name" | "size" | "packed" | "modified" | "crc" | "ratio";
 export type SortDir = "asc" | "desc";

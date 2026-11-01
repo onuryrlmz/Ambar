@@ -14,10 +14,34 @@ export interface ArchiveIndex {
 }
 
 function normalize(p: string): string {
-  let s = p.replace(/\\/g, "/");
-  while (s.startsWith("./")) s = s.slice(2);
-  s = s.replace(/^\/+/, "").replace(/\/+$/, "");
-  return s;
+  const s = p.replace(/\\/g, "/");
+  let a = 0;
+  // Index loops: regex trimming is quadratic on long slash runs.
+  for (;;) {
+    if (s.startsWith("./", a)) a += 2;
+    else if (s.charCodeAt(a) === 47) a++;
+    else break;
+  }
+  let b = s.length;
+  while (b > a && s.charCodeAt(b - 1) === 47) b--;
+  return s.slice(a, b);
+}
+
+/** Deeper entries (hostile names) become one root-level node named by the whole path. */
+const MAX_SEGMENTS = 512;
+
+function isDeep(path: string): boolean {
+  let n = 0;
+  for (let i = 0; i < path.length; i++) {
+    if (path.charCodeAt(i) === 47 && ++n >= MAX_SEGMENTS) return true;
+  }
+  return false;
+}
+
+function locate(path: string): [string, string, boolean] {
+  if (isDeep(path)) return ["", path, true];
+  const [parent, name] = split(path);
+  return [parent, name, false];
 }
 
 function slot(index: ArchiveIndex, dir: string): Map<string, Acc> {
@@ -72,10 +96,10 @@ export function buildIndex(entries: Entry[]): ArchiveIndex {
   for (const e of entries) {
     const path = normalize(e.path);
     if (!path) continue;
-    const [parent, name] = split(path);
+    const [parent, name, deep] = locate(path);
     if (e.isDir) {
       // Make sure ancestors exist, then the folder itself.
-      applyToAncestors(index, path + "/x", 0, 0, 1);
+      if (!deep) applyToAncestors(index, path + "/x", 0, 0, 1);
       const a = folderAcc(index, parent, name, path);
       a.explicit = true;
       a.node.modified = e.modified;
@@ -86,7 +110,7 @@ export function buildIndex(entries: Entry[]): ArchiveIndex {
     const m = slot(index, parent);
     const key = "f:" + name;
     const old = m.get(key);
-    if (old) applyToAncestors(index, path, old.node.size, old.node.packed, -1);
+    if (old && !deep) applyToAncestors(index, path, old.node.size, old.node.packed, -1);
     m.set(key, {
       node: {
         name, path, isDir: false, size: e.size, packed: e.packed,
@@ -96,7 +120,7 @@ export function buildIndex(entries: Entry[]): ArchiveIndex {
       nullPacked: 0,
       explicit: true,
     });
-    applyToAncestors(index, path, e.size, e.packed, 1);
+    if (!deep) applyToAncestors(index, path, e.size, e.packed, 1);
   }
   return index;
 }
@@ -131,7 +155,7 @@ export function descendantPaths(index: ArchiveIndex, paths: string[]): string[] 
   };
   for (const raw of paths) {
     const p = normalize(raw);
-    const [parent, name] = split(p);
+    const [parent, name] = locate(p);
     const m = index.dirs.get(parent);
     if (!m) continue;
     if (m.has("f:" + name)) out.add(p);

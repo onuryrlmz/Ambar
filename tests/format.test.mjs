@@ -21,3 +21,8 @@ test("formatDate uses ms and Turkish locale", () => {
   assert.match(s, /05\.01\.2026/);
   assert.equal(formatDate(null), "—");
 });
+
+test("formatBytes bumps the unit when rounding reaches 1024", () => {
+  assert.equal(formatBytes(1048575), "1 MB");
+  assert.equal(formatBytes(1024 * 1024), "1 MB");
+});

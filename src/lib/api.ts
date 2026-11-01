@@ -32,13 +32,19 @@ let listening: Promise<void> | null = null;
 export function initJobEvents(): Promise<void> {
   if (!listening) {
     listening = (async () => {
-      await listen<ProgressEvent>("job-progress", (e) => jobs.get(e.payload.id)?.onProgress?.(e.payload));
-      await listen<ConflictEvent>("job-conflict", (e) => jobs.get(e.payload.id)?.onConflict?.(e.payload));
-      await listen<DoneEvent>("job-done", (e) => {
-        const h = jobs.get(e.payload.id);
-        jobs.delete(e.payload.id);
-        h?.onDone(e.payload);
-      });
+      const undo: (() => void)[] = [];
+      try {
+        undo.push(await listen<ProgressEvent>("job-progress", (e) => jobs.get(e.payload.id)?.onProgress?.(e.payload)));
+        undo.push(await listen<ConflictEvent>("job-conflict", (e) => jobs.get(e.payload.id)?.onConflict?.(e.payload)));
+        undo.push(await listen<DoneEvent>("job-done", (e) => {
+          const h = jobs.get(e.payload.id);
+          jobs.delete(e.payload.id);
+          h?.onDone(e.payload);
+        }));
+      } catch (err) {
+        for (const u of undo) u(); // a retry must not double-fire
+        throw err;
+      }
     })().catch((err) => {
       listening = null;
       throw err;

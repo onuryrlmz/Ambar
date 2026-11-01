@@ -29,3 +29,13 @@ test("size sort and null modified last", () => {
   const m = sortNodes([{ ...n("x"), modified: null }, { ...n("y"), modified: 5 }], "modified", "asc");
   assert.deepEqual(m.map((x) => x.name), ["y", "x"]);
 });
+
+test("crc and ratio sort keys, nulls last", () => {
+  const x = (name, o) => ({ ...n(name), ...o });
+  const c = sortNodes([x("a", { crc: 9 }), x("b", { crc: null }), x("c", { crc: 2 })], "crc", "asc");
+  assert.deepEqual(c.map((v) => v.name), ["c", "a", "b"]);
+  const r = sortNodes(
+    [x("a", { size: 10, packed: 9 }), x("b", { size: 0, packed: 0 }), x("c", { size: 10, packed: 2 })],
+    "ratio", "desc");
+  assert.deepEqual(r.map((v) => v.name), ["a", "c", "b"]);
+});
