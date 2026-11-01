@@ -211,20 +211,46 @@ pub fn write_via_temp(
     keep_broken: bool,
     write: impl FnOnce(&Path) -> Result<(), ArchiveError>,
 ) -> Result<(), ArchiveError> {
-    let mut name: OsString = target.as_os_str().to_owned();
-    name.push(".ambar-part");
-    let temp = PathBuf::from(name);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    match write(&temp) {
-        Ok(()) => {
-            std::fs::rename(&temp, target)?;
-            Ok(())
+    // Never touch anything that already sits at the temp path: pick a free name.
+    let temp = {
+        let mut n = 0u32;
+        loop {
+            let mut name: OsString = target.as_os_str().to_owned();
+            name.push(".ambar-part");
+            if n > 0 {
+                name.push(format!(".{n}"));
+            }
+            let cand = PathBuf::from(name);
+            match std::fs::symlink_metadata(&cand) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break cand,
+                Err(e) => return Err(e.into()),
+                Ok(_) => n += 1,
+            }
         }
+    };
+    match write(&temp) {
+        Ok(()) => match std::fs::rename(&temp, target) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                Err(e.into())
+            }
+        },
         Err(e) => {
-            if keep_broken && temp.exists() {
-                let _ = std::fs::rename(&temp, target);
+            // The temp name was free before `write`, so anything there is ours.
+            if keep_broken && std::fs::symlink_metadata(&temp).is_ok() {
+                // Never replace an existing target with broken output.
+                let keep = if std::fs::symlink_metadata(target).is_ok() {
+                    free_name(target)
+                } else {
+                    target.to_path_buf()
+                };
+                if std::fs::rename(&temp, keep).is_err() {
+                    let _ = std::fs::remove_file(&temp);
+                }
             } else {
                 let _ = std::fs::remove_file(&temp);
             }
@@ -452,5 +478,83 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(&t).unwrap(), "new");
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_via_temp_ignores_symlink_at_temp_path() {
+        let d = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let victim = out.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let t = d.path().join("a.txt");
+        std::os::unix::fs::symlink(&victim, d.path().join("a.txt.ambar-part")).unwrap();
+        write_via_temp(&t, false, |p| {
+            fs::write(p, "new")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(&t).unwrap(), "new");
+        assert!(fs::symlink_metadata(d.path().join("a.txt.ambar-part"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn write_via_temp_early_failure_keeps_user_file_at_temp_path() {
+        for keep in [false, true] {
+            let d = tempfile::tempdir().unwrap();
+            let user = d.path().join("a.txt.ambar-part");
+            fs::write(&user, "mine").unwrap();
+            let t = d.path().join("a.txt");
+            let r = write_via_temp(&t, keep, |_| Err(ArchiveError::Corrupt("x".into())));
+            assert!(r.is_err());
+            assert_eq!(fs::read_to_string(&user).unwrap(), "mine");
+            assert!(!t.exists());
+        }
+    }
+
+    #[test]
+    fn write_via_temp_collision_with_part_named_entry_loses_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let first = d.path().join("a.txt.ambar-part");
+        write_via_temp(&first, false, |p| Ok(fs::write(p, "one")?)).unwrap();
+        let second = d.path().join("a.txt");
+        write_via_temp(&second, false, |p| Ok(fs::write(p, "two")?)).unwrap();
+        assert_eq!(fs::read_to_string(&first).unwrap(), "one");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "two");
+    }
+
+    #[test]
+    fn write_via_temp_keep_broken_never_replaces_existing_target() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("a.txt");
+        fs::write(&t, "good").unwrap();
+        let r = write_via_temp(&t, true, |p| {
+            fs::write(p, "half")?;
+            Err(ArchiveError::Corrupt("x".into()))
+        });
+        assert!(r.is_err());
+        assert_eq!(fs::read_to_string(&t).unwrap(), "good");
+        assert_eq!(
+            fs::read_to_string(d.path().join("a (1).txt")).unwrap(),
+            "half"
+        );
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_via_temp_rename_failure_removes_temp() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("a.txt");
+        fs::create_dir(&t).unwrap();
+        fs::write(t.join("inner"), "x").unwrap();
+        let r = write_via_temp(&t, false, |p| Ok(fs::write(p, "new")?));
+        assert!(r.is_err());
+        assert!(!d.path().join("a.txt.ambar-part").exists());
+        assert!(t.join("inner").exists());
     }
 }
