@@ -150,6 +150,12 @@ fn pax_lookup(data: &[u8], key: &str) -> Result<Option<Vec<u8>>, String> {
     Ok(found)
 }
 
+/// A PAX time is decimal seconds, with an optional fraction. Anything else is no time.
+fn pax_seconds(value: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(value).ok()?;
+    text.split('.').next()?.parse().ok()
+}
+
 fn header_checksum_ok(block: &[u8; 512], h: &tar::Header) -> bool {
     let sum: u32 = block[..148]
         .iter()
@@ -401,6 +407,10 @@ impl TarLikeEngine {
                     Err(e) => bail!(e),
                 }
             }
+            let pax_time = pax
+                .as_deref()
+                .and_then(|p| pax_lookup(p, "mtime").ok().flatten())
+                .and_then(|v| pax_seconds(&v));
             let name_bytes = raw_name
                 .or_else(|| long_name.take())
                 .unwrap_or_else(|| h.path_bytes().into_owned());
@@ -434,7 +444,7 @@ impl TarLikeEngine {
                     },
                     size_unknown: false,
                     packed: None,
-                    modified: h.mtime().ok().map(|t| t as i64),
+                    modified: pax_time.or_else(|| h.mtime().ok().map(|t| t as i64)),
                     crc: None,
                     encrypted: false,
                 },
@@ -875,6 +885,38 @@ mod tests {
         let rep = TarLikeEngine::new(&a, Format::Tar).extract(None, &req(&out), &mut ctl()).unwrap();
         assert_eq!((rep.ok, rep.failed.len()), (1, 0), "{:?}", rep.failed);
         assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"x");
+    }
+
+    /// Python's tarfile and `tar --format=pax` put a zero in the header and the time here.
+    #[test]
+    fn a_pax_time_overrides_the_header_time() {
+        let mut zeroed = ::tar::Header::new_ustar();
+        zeroed.set_path("a.txt").unwrap();
+        zeroed.set_mode(0o644);
+        zeroed.set_size(1);
+        zeroed.set_mtime(0);
+        zeroed.set_cksum();
+        let mut body = zeroed.as_bytes().to_vec();
+        body.extend(padded(b"x".to_vec()));
+        let dir = tempfile::tempdir().unwrap();
+        for (value, want) in [
+            ("1650000000.625", 1_650_000_000),
+            ("1650000000", 1_650_000_000),
+            // Not a time: the header's stands, and the archive is not damaged for it.
+            ("yarin", 0),
+            ("", 0),
+        ] {
+            let mut t = pax(&pax_record("mtime", value));
+            t.extend(&body);
+            let a = write(dir.path(), "a.tar", &tar_of(&[t], 2));
+            let es = TarLikeEngine::new(&a, Format::Tar).list(None).unwrap().1;
+            assert_eq!(es[0].modified, Some(want), "{value:?}");
+            if want != 0 {
+                let out = dir.path().join("out");
+                TarLikeEngine::new(&a, Format::Tar).extract(None, &req(&out), &mut ctl()).unwrap();
+                assert_eq!(crate::engine::disk_mtime(&out.join("a.txt")), want, "{value:?}");
+            }
+        }
     }
 
     #[test]
