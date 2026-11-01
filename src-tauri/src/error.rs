@@ -79,3 +79,23 @@ impl From<std::io::Error> for ArchiveError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn io_error_mapping() {
+        let e: ArchiveError = Error::from(ErrorKind::StorageFull).into();
+        assert!(matches!(e, ArchiveError::DiskFull));
+        let e: ArchiveError = Error::from(ErrorKind::PermissionDenied).into();
+        assert!(matches!(e, ArchiveError::PermissionDenied(_)));
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["code"], "permission");
+        let v =
+            serde_json::to_value(ArchiveError::from(Error::from(ErrorKind::StorageFull))).unwrap();
+        assert_eq!(v["code"], "disk_full");
+        assert_eq!(v["detail"], "");
+    }
+}
