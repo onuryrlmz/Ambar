@@ -155,16 +155,6 @@ pub fn answer_conflict(jobs: State<'_, Jobs>, id: String, choice: ConflictChoice
 }
 
 #[tauri::command]
-pub async fn forget_password(session: State<'_, Session>, path: String) -> Result<(), ArchiveError> {
-    let session = session.inner().clone();
-    blocking(move || {
-        session.forget_password(Path::new(&path));
-        Ok(())
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn list_local(path: String) -> Result<Vec<LocalEntry>, ArchiveError> {
     blocking(move || local_fs::list_local(Path::new(&path))).await
 }

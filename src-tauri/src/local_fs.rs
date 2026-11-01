@@ -19,7 +19,11 @@ pub struct LocalEntry {
     pub modified: Option<i64>,
 }
 
+/// `dir` must be absolute: a relative one would follow the process's working folder.
 pub fn list_local(dir: &Path) -> Result<Vec<LocalEntry>, ArchiveError> {
+    if !dir.is_absolute() {
+        return Err(ArchiveError::RelativePath(dir.to_string_lossy().into_owned()));
+    }
     let mut out = Vec::new();
     for item in std::fs::read_dir(dir)? {
         let Ok(item) = item else { continue };
@@ -106,6 +110,13 @@ mod tests {
         let r = list_local(&p);
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(r.unwrap_err().code(), "permission");
+    }
+
+    #[test]
+    fn a_relative_path_is_refused_instead_of_following_the_process_folder() {
+        for p in ["", ".", "src", "../x", "~", "~/x"] {
+            assert_eq!(list_local(Path::new(p)).unwrap_err().code(), "relative_path", "{p:?}");
+        }
     }
 
     #[test]

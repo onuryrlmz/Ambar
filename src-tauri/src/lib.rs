@@ -37,7 +37,7 @@ pub fn run() {
             sess.cleanup_stale();
             app.manage(sess);
             let handle = app.handle();
-            app.set_menu(menu::build(handle, "tr")?)?;
+            app.set_menu(menu::build(handle, "tr", false)?)?;
             app.on_menu_event(|app, event| menu::forward_event(app, event.id().as_ref()));
             Ok(())
         })
@@ -47,7 +47,6 @@ pub fn run() {
             commands::start_test,
             commands::cancel_job,
             commands::answer_conflict,
-            commands::forget_password,
             commands::list_local,
             commands::home_dir,
             commands::parent_dir,

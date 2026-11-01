@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   archiveCrumbs, baseName, beginGesture, clampSplit, closeTab, emptyTabs, fileToShow, fitColumns, focusTab, isArchiveName, isCloseTabKey, isReloadKey,
-  keyCommand, listModel, localCrumbs, tabLabel, moveGesture, moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pressRow,
+  expandHome, keyCommand, listModel, parseShowHidden, visibleRows, localCrumbs, tabLabel, moveGesture, moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pressRow,
   pruneSelection, releaseGesture, rowKey, selectAll, selectClick, selectedPaths, selectionSummary, toggleCursor, toggleSort, updateTab,
 } from "../src/lib/tabs-core.ts";
 
@@ -388,4 +388,23 @@ test("selectionSummary has no size when a selected row's size is unknown", () =>
   ]);
   assert.deepEqual(selectionSummary(m, new Set(["f:a"])), { count: 1, size: 5 });
   assert.deepEqual(selectionSummary(m, new Set(["f:a", "f:u"])), { count: 2, size: null });
+});
+
+test("hidden rows are left out unless asked for, and that is off by default", () => {
+  const rows = [{ name: ".git", hidden: true }, { name: "a.txt", hidden: false }];
+  assert.deepEqual(visibleRows(rows, false).map((r) => r.name), ["a.txt"]);
+  assert.deepEqual(visibleRows(rows, true).map((r) => r.name), [".git", "a.txt"]);
+  assert.equal(parseShowHidden(null), false);
+  assert.equal(parseShowHidden("garbage"), false);
+  assert.equal(parseShowHidden("false"), false);
+  assert.equal(parseShowHidden("true"), true);
+});
+
+test("expandHome handles ~ and ~/x only", () => {
+  assert.equal(expandHome("~", "/Users/o"), "/Users/o");
+  assert.equal(expandHome("~/Masaüstü", "/Users/o"), "/Users/o/Masaüstü");
+  assert.equal(expandHome("~\\x", "C:\\Users\\o"), "C:\\Users\\o\\x");
+  assert.equal(expandHome("~kim/x", "/Users/o"), "~kim/x");
+  assert.equal(expandHome("/a/~", "/Users/o"), "/a/~");
+  assert.equal(expandHome("göreli", "/Users/o"), "göreli");
 });

@@ -392,6 +392,17 @@ export function isCloseTabKey(e: KeyMods, mac: boolean): boolean {
 
 export const MIN_PANE_PX = 260;
 
+/** `raw` is what `localStorage` held for `ambar.showHidden`. Off unless it says otherwise. */
+export const parseShowHidden = (raw: string | null): boolean => raw === "true";
+
+export const visibleRows = <R extends { hidden: boolean }>(rows: R[], showHidden: boolean): R[] =>
+  showHidden ? rows : rows.filter((r) => !r.hidden);
+
+/** A typed `~` or `~/x` under the home folder. `~kim` is left alone, and refused as relative. */
+export function expandHome(typed: string, home: string): string {
+  return typed === "~" || /^~[\\/]/.test(typed) ? home + typed.slice(1) : typed;
+}
+
 /** `raw` is what `localStorage` held for `ambar.split`. */
 export function parseSplit(raw: string | null): number {
   const v = raw === null ? NaN : Number(raw);

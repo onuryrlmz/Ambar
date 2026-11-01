@@ -1,7 +1,7 @@
 <script lang="ts">
   import { safeName, type JobSummary } from "../flows.ts";
   import { formatCount } from "../format.ts";
-  import { errorText, t } from "../i18n/index.ts";
+  import { errorMessage, errorText, t } from "../i18n/index.ts";
   import Icon from "../Icon.svelte";
   import type { FileFailure } from "../types.ts";
   import VirtualList from "../VirtualList.svelte";
@@ -46,7 +46,7 @@
       return out;
     }
     if (summary.error) {
-      out.push(errorText(summary.error.code));
+      out.push(errorMessage(summary.error));
       return out;
     }
     if (summary.ok > 0) {
@@ -87,7 +87,7 @@
             <div class="failure" class:detailed={details}>
               <div class="top">
                 <span class="path" title={safeName(f.path)}>{safeName(f.path)}</span>
-                <span class="code">{errorText(f.error.code)}</span>
+                <span class="code">{errorMessage(f.error)}</span>
               </div>
               {#if details}
                 <div class="detail">{f.error.detail ? safeName(f.error.detail) : t("result.noDetails")}</div>

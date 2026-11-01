@@ -7,7 +7,7 @@ export type Format =
 export type ErrorCode =
   | "not_archive" | "password_required" | "wrong_password" | "missing_volume" | "corrupt"
   | "disk_full" | "permission" | "unsafe_path" | "dest_conflict" | "unsupported"
-  | "cancelled" | "risky_open" | "io";
+  | "cancelled" | "risky_open" | "relative_path" | "io";
 
 export interface ArchiveError {
   code: ErrorCode;

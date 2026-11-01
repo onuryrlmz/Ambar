@@ -34,6 +34,12 @@ export function t(key: string, params?: Record<string, string | number>): string
   return s;
 }
 
+/** Like `errorText`, for a whole error: its detail can say more than its code. */
+export function errorMessage(error: { code: string; detail: string }): string {
+  if (error.code === "unsupported" && error.detail === "link") return t("errors.unsupported_link");
+  return errorText(error.code);
+}
+
 /** The user-facing text for a backend error; an unknown code reads as a generic I/O error. */
 export function errorText(code: string): string {
   const key = `errors.${code}`;

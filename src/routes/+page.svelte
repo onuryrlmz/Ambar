@@ -13,7 +13,7 @@
   import { safeName } from "$lib/flows.ts";
   import { getLang, setLang, t, type Lang } from "$lib/i18n/index.ts";
   import Icon from "$lib/Icon.svelte";
-  import { localModel, localView } from "$lib/local.svelte.ts";
+  import { localModel, localShowHidden, localView, toggleShowHidden } from "$lib/local.svelte.ts";
   import LocalPane from "$lib/LocalPane.svelte";
   import { extractDragged, extractWithDialog, openLocalFile, openPaths, previewLocalFile, showEntry, testArchive } from "$lib/operations.ts";
   import StatusBar from "$lib/StatusBar.svelte";
@@ -176,7 +176,7 @@
     setLang(l);
     lang = l;
     document.documentElement.lang = l;
-    void setMenuLanguage(l);
+    void setMenuLanguage(l, localShowHidden());
   }
 
   function runAction(action: ToolAction) {
@@ -203,6 +203,8 @@
     if (modalOpen()) {
       if (id === "close-window") void getCurrentWindow().close();
       else if (id === "select-all" && document.activeElement instanceof HTMLInputElement) document.activeElement.select();
+      // The click already flipped the native check mark: put it back.
+      else if (id === "show-hidden") void setMenuLanguage(lang, localShowHidden());
       return;
     }
     switch (id) {
@@ -230,6 +232,10 @@
         break;
       case "refresh":
         void localPane?.refresh();
+        break;
+      case "show-hidden":
+        toggleShowHidden();
+        void setMenuLanguage(lang, localShowHidden());
         break;
       case "lang-tr":
         changeLang("tr");
@@ -303,7 +309,7 @@
 
   onMount(() => {
     document.documentElement.lang = lang;
-    if (lang !== "tr") void setMenuLanguage(lang);
+    if (lang !== "tr" || localShowHidden()) void setMenuLanguage(lang, localShowHidden());
     void initJobEvents().catch(() => {});
     const unlisten = listen<string>("menu", (e) => onMenu(e.payload));
     const undrop = getCurrentWebview().onDragDropEvent(({ payload }) => {

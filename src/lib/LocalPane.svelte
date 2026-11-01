@@ -6,7 +6,7 @@
   import Icon from "./Icon.svelte";
   import Crumbs from "./Crumbs.svelte";
   import {
-    dismissLocalError, goHome, goTo, goUp, localError, localModel, localSort, localView,
+    dismissLocalError, goHome, goTo, goTyped, goUp, localError, localModel, localSort, localView,
     refreshLocal, setLocalView, startLocal, toggleLocalSort, type LocalRow,
   } from "./local.svelte.ts";
   import { safeName } from "./names.ts";
@@ -68,7 +68,7 @@
   function commitPath() {
     const path = draft.trim();
     stopEditing();
-    if (path && path !== view.cwd) void goTo(path);
+    if (path && path !== view.cwd) void goTyped(path);
   }
 
   export const handleKey = (e: KeyboardEvent) => list?.handleKey(e) ?? false;

@@ -27,6 +27,8 @@ pub enum ArchiveError {
     Cancelled,
     #[error("risky file type: {0}")]
     RiskyOpen(String),
+    #[error("not a full path: {0}")]
+    RelativePath(String),
     #[error("io error: {0}")]
     Io(String),
 }
@@ -46,6 +48,7 @@ impl ArchiveError {
             Self::Unsupported(_) => "unsupported",
             Self::Cancelled => "cancelled",
             Self::RiskyOpen(_) => "risky_open",
+            Self::RelativePath(_) => "relative_path",
             Self::Io(_) => "io",
         }
     }
@@ -59,6 +62,7 @@ impl ArchiveError {
             | Self::DestConflict(s)
             | Self::Unsupported(s)
             | Self::RiskyOpen(s)
+            | Self::RelativePath(s)
             | Self::Io(s) => s.clone(),
             _ => String::new(),
         }

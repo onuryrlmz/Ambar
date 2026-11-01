@@ -70,14 +70,6 @@ impl Session {
             .insert(key(path), pw);
     }
 
-    pub fn forget_password(&self, path: &Path) {
-        self.0
-            .passwords
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&key(path));
-    }
-
     /// A fresh, private, empty folder for one `open_entry` call.
     pub fn new_temp_dir(&self) -> Result<PathBuf, ArchiveError> {
         let n = self.0.counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -271,7 +263,7 @@ mod tests {
     use crate::jobs::{JobOp, Jobs};
 
     #[test]
-    fn password_cached_per_path_and_forgotten() {
+    fn password_cached_per_path() {
         let d = tempfile::tempdir().unwrap();
         let s = Session::new(d.path().join(TEMP_DIR_NAME));
         let a = d.path().join("a.rar");
@@ -282,8 +274,6 @@ mod tests {
         assert!(s.resolve_password(&b, None).is_none());
         let given = s.resolve_password(&a, Some(Zeroizing::new("other".into())));
         assert_eq!(given.unwrap().as_str(), "other");
-        s.forget_password(&a);
-        assert!(s.resolve_password(&a, None).is_none());
     }
 
     #[test]
@@ -463,7 +453,7 @@ mod tests {
         let r = run_job(&s, &z, Some("doğru"), &["gizli.txt"]);
         assert_eq!(r["report"]["ok"], 1);
         assert_eq!(s.resolve_password(&z, None).unwrap().as_str(), "doğru");
-        s.forget_password(&z);
+        let s = Session::new(d.path().join(TEMP_DIR_NAME));
         // Only the plain entry selected: the password proved nothing.
         let r = run_job(&s, &z, Some("herhangi"), &["plain.txt"]);
         assert_eq!(r["report"]["ok"], 1);

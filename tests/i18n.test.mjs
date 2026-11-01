@@ -2,13 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { tr } from "../src/lib/i18n/tr.ts";
 import { en } from "../src/lib/i18n/en.ts";
-import { t, setLang } from "../src/lib/i18n/index.ts";
+import { errorMessage, t, setLang } from "../src/lib/i18n/index.ts";
 
 // Keep in sync with ArchiveError::code() in src-tauri/src/error.rs.
 const CODES = [
   "not_archive", "password_required", "wrong_password", "missing_volume", "corrupt",
   "disk_full", "permission", "unsafe_path", "dest_conflict", "unsupported",
-  "cancelled", "risky_open", "io",
+  "cancelled", "risky_open", "relative_path", "io",
 ];
 
 test("tr and en have identical key sets", () => {
@@ -32,4 +32,20 @@ test("setLang switches language", () => {
   setLang("en");
   assert.equal(t("errors.io"), en["errors.io"]);
   setLang("tr");
+});
+
+test("a link entry says why, other unsupported details keep the generic text", () => {
+  for (const [lang, table] of [["tr", tr], ["en", en]]) {
+    setLang(lang);
+    assert.equal(errorMessage({ code: "unsupported", detail: "link" }), table["errors.unsupported_link"]);
+    assert.notEqual(table["errors.unsupported_link"], table["errors.unsupported"]);
+    assert.equal(errorMessage({ code: "unsupported", detail: "fifo" }), table["errors.unsupported"]);
+    assert.equal(errorMessage({ code: "corrupt", detail: "link" }), table["errors.corrupt"]);
+  }
+  setLang("tr");
+});
+
+test("the menu has a label for hidden files in both languages", () => {
+  assert.ok(tr["menu.showHidden"]);
+  assert.ok(en["menu.showHidden"]);
 });

@@ -45,7 +45,7 @@ fn item<R: Runtime>(
     b.build(app)
 }
 
-pub fn build<R: Runtime>(app: &AppHandle<R>, lang: &str) -> tauri::Result<Menu<R>> {
+pub fn build<R: Runtime>(app: &AppHandle<R>, lang: &str, show_hidden: bool) -> tauri::Result<Menu<R>> {
     let labels = parse_labels(table(lang));
     // A missing key shows up as the key itself; a test keeps that from happening.
     let l = |key: &'static str| -> &'static str { labels.get(key).copied().unwrap_or(key) };
@@ -104,6 +104,11 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, lang: &str) -> tauri::Result<Menu<R
 
     let mut view = SubmenuBuilder::new(app, l("menu.view"))
         .item(&item(app, "refresh", l("menu.refresh"), Some("CmdOrCtrl+R"))?)
+        .item(
+            &CheckMenuItemBuilder::with_id("show-hidden", l("menu.showHidden"))
+                .checked(show_hidden)
+                .build(app)?,
+        )
         .separator()
         .item(&language);
     if cfg!(target_os = "macos") {
@@ -141,8 +146,12 @@ pub fn forward_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
 }
 
 #[tauri::command]
-pub fn set_menu_language(app: AppHandle, lang: String) -> Result<(), crate::error::ArchiveError> {
-    build(&app, &lang)
+pub fn set_menu_language(
+    app: AppHandle,
+    lang: String,
+    show_hidden: bool,
+) -> Result<(), crate::error::ArchiveError> {
+    build(&app, &lang, show_hidden)
         .and_then(|menu| app.set_menu(menu).map(|_| ()))
         .map_err(|e| crate::error::ArchiveError::Io(e.to_string()))
 }
@@ -156,7 +165,7 @@ mod tests {
         "menu.extract", "menu.test", "menu.show", "menu.info", "menu.quit", "menu.undo",
         "menu.redo", "menu.cut", "menu.copy", "menu.paste", "menu.selectAll", "menu.refresh",
         "menu.language", "menu.langTr", "menu.langEn", "menu.fullscreen", "menu.minimize",
-        "menu.about", "menu.services", "menu.hide", "menu.hideOthers", "menu.showAll",
+        "menu.about", "menu.services", "menu.hide", "menu.hideOthers", "menu.showAll", "menu.showHidden",
     ];
 
     #[test]

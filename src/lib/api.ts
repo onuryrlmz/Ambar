@@ -71,8 +71,6 @@ export const cancelJob = (id: string) => invoke<void>("cancel_job", { id });
 export const answerConflict = (id: string, choice: ConflictChoice) =>
   invoke<void>("answer_conflict", { id, choice });
 
-export const forgetPassword = (path: string) => invoke<void>("forget_password", { path });
-
 export const listLocal = (path: string) => invoke<LocalEntry[]>("list_local", { path });
 
 export const homeDir = () => invoke<string>("home_dir");
@@ -94,5 +92,6 @@ export const openLocal = (path: string, allowRisky: boolean) => invoke<void>("op
 /** Previews a local file with Quick Look, never launching it. macOS only. */
 export const quickLookLocal = (path: string) => invoke<void>("quick_look_local", { path });
 
-/** Rebuilds the native menu in this language. */
-export const setMenuLanguage = (lang: string) => invoke<void>("set_menu_language", { lang });
+/** Rebuilds the native menu in this language, with its hidden-files check mark. */
+export const setMenuLanguage = (lang: string, showHidden: boolean) =>
+  invoke<void>("set_menu_language", { lang, showHidden });

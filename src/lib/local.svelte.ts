@@ -16,6 +16,17 @@ const toRow = (e: LocalEntry): LocalRow => ({
   encrypted: false, crc: null, hidden: e.hidden, isSymlink: e.isSymlink,
 });
 
+const HIDDEN_KEY = "ambar.showHidden";
+
+function loadShowHidden(): boolean {
+  try {
+    return core.parseShowHidden(localStorage.getItem(HIDDEN_KEY));
+  } catch {
+    return false;
+  }
+}
+
+let showHidden = $state.raw(loadShowHidden());
 let view = $state.raw(core.newView(""));
 let rows = $state.raw<LocalRow[]>([]);
 let sort = $state.raw<core.SortState>({ sortKey: "name", sortDir: "asc" });
@@ -24,12 +35,24 @@ let listError = $state.raw<{ path: string | null; code: string } | null>(null);
 let started = false;
 let latest = 0;
 
-const model = $derived(core.listModel(sortNodes(rows, sort.sortKey, sort.sortDir)));
+const model = $derived(core.listModel(sortNodes(core.visibleRows(rows, showHidden), sort.sortKey, sort.sortDir)));
 
 export const localView = () => view;
 export const localModel = () => model;
 export const localSort = () => sort;
 export const localError = () => listError;
+export const localShowHidden = () => showHidden;
+
+export function toggleShowHidden() {
+  showHidden = !showHidden;
+  try {
+    localStorage.setItem(HIDDEN_KEY, String(showHidden));
+  } catch {
+    // no storage: the choice just is not remembered
+  }
+  view = core.pruneSelection(view, model.indexOf);
+}
+
 export const dismissLocalError = () => {
   listError = null;
 };
@@ -65,6 +88,18 @@ export async function goHome(): Promise<void> {
   try {
     const home = await homeDir();
     if (mine === latest) await show(mine, home);
+  } catch (e) {
+    if (mine === latest) listError = { path: null, code: toArchiveError(e).code };
+  }
+}
+
+/** A path typed into the address bar. */
+export async function goTyped(typed: string): Promise<void> {
+  if (!typed.startsWith("~")) return goTo(typed);
+  const mine = ++latest;
+  try {
+    const home = await homeDir();
+    if (mine === latest) await show(mine, core.expandHome(typed, home));
   } catch (e) {
     if (mine === latest) listError = { path: null, code: toArchiveError(e).code };
   }
