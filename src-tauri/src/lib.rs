@@ -3,10 +3,27 @@ pub mod commands;
 pub mod error;
 pub mod jobs;
 pub mod local_fs;
+pub mod open_guard;
 pub mod session;
+
+/// Cancels running jobs, waits briefly so they remove their partial files, then
+/// deletes this run's decrypted temp files.
+fn shutdown(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(jobs) = app.try_state::<jobs::Jobs>() {
+        jobs.cancel_all();
+        jobs.wait_idle(std::time::Duration::from_secs(2));
+    }
+    if let Some(session) = app.try_state::<session::Session>() {
+        session.cleanup();
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Release builds: a panic payload could hold archive-derived data, so print nothing.
+    #[cfg(not(any(debug_assertions, test)))]
+    std::panic::set_hook(Box::new(|_| {}));
     tauri::Builder::default()
         .manage(jobs::Jobs::default())
         .setup(|app| {
@@ -19,17 +36,6 @@ pub fn run() {
             sess.cleanup_stale();
             app.manage(sess);
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                use tauri::Manager;
-                if let Some(j) = window.try_state::<jobs::Jobs>() {
-                    j.cancel_all();
-                }
-                if let Some(s) = window.try_state::<session::Session>() {
-                    s.cleanup();
-                }
-            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::open_archive,
@@ -45,6 +51,12 @@ pub fn run() {
         ])
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Covers window close and Cmd+Q alike. Idempotent.
+            if let tauri::RunEvent::Exit = event {
+                shutdown(app);
+            }
+        });
 }

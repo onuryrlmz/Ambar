@@ -10,9 +10,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// At most 20 progress events per second.
@@ -59,10 +59,16 @@ struct JobHandle {
     answers: Sender<ConflictChoice>,
 }
 
-#[derive(Default)]
+type JobMap = Mutex<HashMap<String, JobHandle>>;
+
+fn lock(m: &JobMap) -> MutexGuard<'_, HashMap<String, JobHandle>> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Cheap to clone; clones share the same job table.
+#[derive(Default, Clone)]
 pub struct Jobs {
-    map: Arc<Mutex<HashMap<String, JobHandle>>>,
-    counter: AtomicU64,
+    map: Arc<JobMap>,
 }
 
 /// `dest` comes from the frontend: it must be an existing absolute folder.
@@ -147,24 +153,31 @@ impl JobCtl for JobContext {
 }
 
 impl Jobs {
-    /// Starts a job thread and returns its id. `make_engine` runs on that thread.
+    /// Starts a job thread under the caller-chosen `id` (the frontend generates it, so
+    /// it can listen before any event fires). `make_engine` runs on that thread.
     pub fn start<F>(
         &self,
+        id: String,
         sink: Arc<dyn EventSink>,
         make_engine: F,
         pw: Option<Password>,
         op: JobOp,
-    ) -> Result<String, ArchiveError>
+    ) -> Result<(), ArchiveError>
     where
         F: FnOnce() -> Result<Box<dyn ArchiveEngine>, ArchiveError> + Send + 'static,
     {
-        let id = format!("job-{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1);
+        if id.is_empty() || id.len() > 128 {
+            return Err(ArchiveError::Io("invalid job id".into()));
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
-        self.map.lock().unwrap().insert(
-            id.clone(),
-            JobHandle { cancel: cancel.clone(), answers: tx },
-        );
+        {
+            let mut m = lock(&self.map);
+            if m.contains_key(&id) {
+                return Err(ArchiveError::Io("job id already running".into()));
+            }
+            m.insert(id.clone(), JobHandle { cancel: cancel.clone(), answers: tx });
+        }
         let map = self.map.clone();
         let thread_id = id.clone();
         let spawned = std::thread::Builder::new()
@@ -188,7 +201,7 @@ impl Jobs {
                 }));
                 let result = outcome.unwrap_or_else(|_| Err(internal_error()));
                 let _ = catch_unwind(AssertUnwindSafe(|| ctx.flush()));
-                map.lock().unwrap_or_else(|e| e.into_inner()).remove(&thread_id);
+                lock(&map).remove(&thread_id);
                 let ev = match result {
                     Ok(report) => DoneEvent { id: thread_id, report: Some(report), error: None },
                     Err(e) => DoneEvent { id: thread_id, report: None, error: Some(e) },
@@ -196,26 +209,40 @@ impl Jobs {
                 sink.done(&ev);
             });
         if let Err(e) = spawned {
-            self.map.lock().unwrap().remove(&id);
+            lock(&self.map).remove(&id);
             return Err(e.into());
         }
-        Ok(id)
+        Ok(())
     }
 
     pub fn cancel(&self, id: &str) {
-        if let Some(h) = self.map.lock().unwrap().get(id) {
+        if let Some(h) = lock(&self.map).get(id) {
             h.cancel.store(true, Ordering::Relaxed);
         }
     }
 
     pub fn cancel_all(&self) {
-        for h in self.map.lock().unwrap().values() {
+        for h in lock(&self.map).values() {
             h.cancel.store(true, Ordering::Relaxed);
         }
     }
 
+    /// Waits until no job is running, or `timeout` passes. True when idle.
+    pub fn wait_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if lock(&self.map).is_empty() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     pub fn answer_conflict(&self, id: &str, choice: ConflictChoice) {
-        if let Some(h) = self.map.lock().unwrap().get(id) {
+        if let Some(h) = lock(&self.map).get(id) {
             let _ = h.answers.send(choice);
         }
     }
@@ -359,7 +386,7 @@ mod tests {
     fn run(mode: Mode) -> (Arc<test_support::FakeSink>, serde_json::Value) {
         let sink = FakeSink::new();
         let jobs = Jobs::default();
-        jobs.start(sink.clone(), engine(mode), None, JobOp::Test).unwrap();
+        jobs.start("job-1".into(), sink.clone(), engine(mode), None, JobOp::Test).unwrap();
         let d = sink.wait_done();
         (sink, d)
     }
@@ -376,7 +403,8 @@ mod tests {
     fn cancel_flag_reaches_engine_and_done_has_cancelled_error() {
         let sink = FakeSink::new();
         let jobs = Jobs::default();
-        let id = jobs.start(sink.clone(), engine(Mode::WaitCancel), None, JobOp::Test).unwrap();
+        let id = "job-7".to_string();
+        jobs.start(id.clone(), sink.clone(), engine(Mode::WaitCancel), None, JobOp::Test).unwrap();
         jobs.cancel(&id);
         let d = sink.wait_done();
         assert_eq!(d["error"]["code"], "cancelled");
@@ -387,7 +415,8 @@ mod tests {
     fn conflict_blocks_until_answer() {
         let sink = FakeSink::new();
         let jobs = Jobs::default();
-        let id = jobs.start(sink.clone(), engine(Mode::Conflict), None, JobOp::Test).unwrap();
+        let id = "job-7".to_string();
+        jobs.start(id.clone(), sink.clone(), engine(Mode::Conflict), None, JobOp::Test).unwrap();
         let c = sink.wait_for("conflict");
         assert_eq!(c["path"], "/x/y");
         std::thread::sleep(Duration::from_millis(150));
@@ -401,7 +430,8 @@ mod tests {
     fn cancel_releases_pending_conflict() {
         let sink = FakeSink::new();
         let jobs = Jobs::default();
-        let id = jobs.start(sink.clone(), engine(Mode::Conflict), None, JobOp::Test).unwrap();
+        let id = "job-7".to_string();
+        jobs.start(id.clone(), sink.clone(), engine(Mode::Conflict), None, JobOp::Test).unwrap();
         sink.wait_for("conflict");
         jobs.cancel(&id);
         assert_eq!(sink.wait_done()["error"]["code"], "cancelled");
@@ -432,7 +462,7 @@ mod tests {
     fn factory_error_is_reported() {
         let sink = FakeSink::new();
         let jobs = Jobs::default();
-        jobs.start(sink.clone(), || Err(ArchiveError::NotAnArchive), None, JobOp::Test).unwrap();
+        jobs.start("j".into(), sink.clone(), || Err(ArchiveError::NotAnArchive), None, JobOp::Test).unwrap();
         assert_eq!(sink.wait_done()["error"]["code"], "not_archive");
     }
 
@@ -444,6 +474,34 @@ mod tests {
         assert!(prog.len() < 100, "got {}", prog.len());
         assert_eq!(prog.last().unwrap().1["current"], "last");
         assert_eq!(prog.last().unwrap().1["doneBytes"], 5000);
+    }
+
+    #[test]
+    fn duplicate_running_id_is_rejected_and_id_is_reusable_after_done() {
+        let sink = FakeSink::new();
+        let jobs = Jobs::default();
+        jobs.start("same".into(), sink.clone(), engine(Mode::WaitCancel), None, JobOp::Test).unwrap();
+        let e = jobs
+            .start("same".into(), sink.clone(), engine(Mode::Ok), None, JobOp::Test)
+            .unwrap_err();
+        assert_eq!(e.code(), "io");
+        assert!(jobs.start(String::new(), sink.clone(), engine(Mode::Ok), None, JobOp::Test).is_err());
+        jobs.cancel("same");
+        assert_eq!(sink.wait_done()["id"], "same");
+        assert!(jobs.wait_idle(Duration::from_secs(5)));
+        jobs.start("same".into(), FakeSink::new(), engine(Mode::Ok), None, JobOp::Test).unwrap();
+    }
+
+    #[test]
+    fn wait_idle_times_out_while_running_and_returns_after_cancel() {
+        let sink = FakeSink::new();
+        let jobs = Jobs::default();
+        assert!(jobs.wait_idle(Duration::from_millis(10)));
+        jobs.start("w".into(), sink.clone(), engine(Mode::WaitCancel), None, JobOp::Test).unwrap();
+        assert!(!jobs.wait_idle(Duration::from_millis(100)));
+        jobs.cancel_all();
+        assert!(jobs.wait_idle(Duration::from_secs(5)));
+        assert_eq!(sink.wait_done()["error"]["code"], "cancelled");
     }
 
     #[test]

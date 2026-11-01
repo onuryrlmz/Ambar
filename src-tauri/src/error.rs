@@ -25,6 +25,8 @@ pub enum ArchiveError {
     Unsupported(String),
     #[error("cancelled")]
     Cancelled,
+    #[error("risky file type: {0}")]
+    RiskyOpen(String),
     #[error("io error: {0}")]
     Io(String),
 }
@@ -43,6 +45,7 @@ impl ArchiveError {
             Self::DestConflict(_) => "dest_conflict",
             Self::Unsupported(_) => "unsupported",
             Self::Cancelled => "cancelled",
+            Self::RiskyOpen(_) => "risky_open",
             Self::Io(_) => "io",
         }
     }
@@ -55,6 +58,7 @@ impl ArchiveError {
             | Self::UnsafePath(s)
             | Self::DestConflict(s)
             | Self::Unsupported(s)
+            | Self::RiskyOpen(s)
             | Self::Io(s) => s.clone(),
             _ => String::new(),
         }
@@ -84,6 +88,13 @@ impl From<std::io::Error> for ArchiveError {
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn risky_open_code_and_detail() {
+        let v = serde_json::to_value(ArchiveError::RiskyOpen("exe".into())).unwrap();
+        assert_eq!(v["code"], "risky_open");
+        assert_eq!(v["detail"], "exe");
+    }
 
     #[test]
     fn io_error_mapping() {
