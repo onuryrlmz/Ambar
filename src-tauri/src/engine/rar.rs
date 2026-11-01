@@ -1,7 +1,11 @@
-//! RAR engine on top of `unrar-ng` (the UnRAR library). Extraction never uses the
-//! crate's own path handling (`extract_all`, `extract_with_base`): each entry goes
+//! RAR engine on top of the UnRAR library (`unrar-ng-sys`). The safe `unrar-ng`
+//! wrapper cannot see redirect records, UTC times, the comment text or set
+//! "keep broken", so this module drives the C API through a small private
+//! wrapper (`ffi`). Extraction never uses UnRAR's own path handling: each entry goes
 //! through `plan_entry` and is written to a temp file via `write_via_temp`, so the
-//! security boundary stays in `plan.rs`.
+//! security boundary stays in `plan.rs`. Redirect entries (symbolic links, hard
+//! links, file copies) are never extracted: UnRAR would resolve their targets
+//! against the process working directory or create real links.
 
 use super::plan::{is_selected, normalize_entry_path, plan_entry, write_via_temp, PlanOutcome};
 use super::{
@@ -9,9 +13,318 @@ use super::{
     Password,
 };
 use crate::error::ArchiveError;
+use ffi::{Arc, Fail, Header, When};
 use std::path::{Path, PathBuf};
-use unrar_ng::error::{Code, UnrarError, When};
-use unrar_ng::{Archive, CursorBeforeHeader, FileHeader, List, OpenArchive, Process, VolumeInfo};
+use unrar_ng::Archive;
+
+/// Minimal unsafe wrapper over the UnRAR C API. Everything unsafe lives here.
+mod ffi {
+    use std::cell::Cell;
+    use std::os::raw::{c_int, c_uint};
+    use std::path::Path;
+    use unrar_ng_sys as sys;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum When {
+        Open,
+        Read,
+        Process,
+    }
+
+    #[derive(Debug)]
+    pub struct Fail {
+        pub code: c_int,
+        pub when: When,
+        /// File name of the volume UnRAR asked for last (set when one was missing).
+        pub volume: Option<String>,
+    }
+
+    pub const OM_LIST: c_uint = sys::RAR_OM_LIST;
+    pub const OM_EXTRACT: c_uint = sys::RAR_OM_EXTRACT;
+    pub const OP_SKIP: c_int = sys::RAR_SKIP;
+    pub const OP_TEST: c_int = sys::RAR_TEST;
+    pub const OP_EXTRACT: c_int = sys::RAR_EXTRACT;
+    pub const ERR_BAD_DATA: c_int = sys::ERAR_BAD_DATA;
+    pub const ERR_BAD_ARCHIVE: c_int = sys::ERAR_BAD_ARCHIVE;
+    pub const ERR_UNKNOWN_FORMAT: c_int = sys::ERAR_UNKNOWN_FORMAT;
+    pub const ERR_EOPEN: c_int = sys::ERAR_EOPEN;
+    pub const ERR_MISSING_PASSWORD: c_int = sys::ERAR_MISSING_PASSWORD;
+    pub const ERR_BAD_PASSWORD: c_int = sys::ERAR_BAD_PASSWORD;
+    pub const ERR_LARGE_DICT: c_int = sys::ERAR_LARGE_DICT;
+    pub const ERR_EREFERENCE: c_int = sys::ERAR_EREFERENCE;
+
+    #[derive(Debug)]
+    pub struct Header {
+        pub filename: String,
+        pub is_dir: bool,
+        pub encrypted: bool,
+        pub unpacked_size: u64,
+        pub crc: u32,
+        pub attr: u32,
+        pub host_unix: bool,
+        /// 0 = regular entry; anything else is a link or file reference.
+        pub redir_type: u32,
+        /// Modification time as Unix seconds (UTC), from the extended time field.
+        pub mtime: Option<i64>,
+    }
+
+    pub struct Flags {
+        pub volume: bool,
+        pub locked: bool,
+        pub solid: bool,
+        pub recovery: bool,
+        pub enc_headers: bool,
+        pub has_comment: bool,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "netbsd"))]
+    type OsPath = std::ffi::CString;
+    #[cfg(not(any(target_os = "linux", target_os = "netbsd")))]
+    type OsPath = Vec<sys::WCHAR>;
+
+    #[cfg(any(target_os = "linux", target_os = "netbsd"))]
+    fn os_path(p: &Path) -> Option<OsPath> {
+        std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).ok()
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "netbsd"))))]
+    fn os_path(p: &Path) -> Option<OsPath> {
+        let s = p.to_str()?;
+        if s.contains('\0') {
+            return None;
+        }
+        let mut v: Vec<sys::WCHAR> = s.chars().map(|c| c as u32 as sys::WCHAR).collect();
+        v.push(0);
+        Some(v)
+    }
+    #[cfg(windows)]
+    fn os_path(p: &Path) -> Option<OsPath> {
+        use std::os::windows::ffi::OsStrExt;
+        let mut v: Vec<sys::WCHAR> = p.as_os_str().encode_wide().collect();
+        if v.contains(&0) {
+            return None;
+        }
+        v.push(0);
+        Some(v)
+    }
+
+    /// Reads a NUL-terminated wchar_t string (at most `max` units).
+    ///
+    /// # Safety
+    /// `p` must point to a readable, NUL-terminated wchar_t string or at least `max` units.
+    unsafe fn wide_to_string(p: *const sys::WCHAR, max: usize) -> String {
+        let mut units: Vec<u32> = Vec::new();
+        for i in 0..max {
+            let u = unsafe { std::ptr::read_unaligned(p.add(i)) };
+            if u == 0 {
+                break;
+            }
+            units.push(u as u32);
+        }
+        if std::mem::size_of::<sys::WCHAR>() == 2 {
+            let u16s: Vec<u16> = units.iter().map(|&u| u as u16).collect();
+            String::from_utf16_lossy(&u16s)
+        } else {
+            units
+                .into_iter()
+                .map(|u| char::from_u32(u).unwrap_or('\u{fffd}'))
+                .collect()
+        }
+    }
+
+    #[derive(Default)]
+    struct CbState {
+        next_volume: Cell<Option<String>>,
+    }
+
+    extern "C" fn callback(
+        msg: sys::UINT,
+        user: sys::LPARAM,
+        p1: sys::LPARAM,
+        p2: sys::LPARAM,
+    ) -> c_int {
+        if msg == sys::UCM_CHANGEVOLUMEW {
+            if user != 0 && p1 != 0 {
+                // SAFETY: `user` is the address of the `CbState` boxed inside the `Arc`
+                // that owns the handle, which outlives every call into the library;
+                // `p1` is the library's NUL-terminated volume name.
+                let st = unsafe { &*(user as *const CbState) };
+                let name = unsafe { wide_to_string(p1 as *const sys::WCHAR, 2048) };
+                st.next_volume.set(Some(name));
+            }
+            // Next volume missing: stop. Present: continue.
+            return if p2 == sys::RAR_VOL_ASK { -1 } else { 0 };
+        }
+        0
+    }
+
+    pub struct Arc {
+        handle: *const sys::Handle,
+        cb: Box<CbState>,
+        pub flags: Flags,
+        pub comment: Option<String>,
+    }
+
+    // The handle is only used from one thread at a time, through `&mut self`.
+    unsafe impl Send for Arc {}
+
+    impl Drop for Arc {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from RAROpenArchiveEx and is closed exactly once.
+            unsafe { sys::RARCloseArchive(self.handle) };
+        }
+    }
+
+    impl Arc {
+        pub fn open(
+            path: &Path,
+            mode: c_uint,
+            password: Option<&str>,
+            keep_broken: bool,
+            want_comment: bool,
+        ) -> Result<Arc, Fail> {
+            let fail = |code| Fail {
+                code,
+                when: When::Open,
+                volume: None,
+            };
+            let name = os_path(path).ok_or_else(|| fail(sys::ERAR_EOPEN))?;
+            let pw = match password {
+                Some(p) => {
+                    Some(std::ffi::CString::new(p).map_err(|_| fail(sys::ERAR_BAD_PASSWORD))?)
+                }
+                None => None,
+            };
+            let cb: Box<CbState> = Box::default();
+            // Asking for the comment makes UnRAR read it during open, which poisons the
+            // handle for header-encrypted archives (the password is set afterwards).
+            let mut cmt: Vec<sys::WCHAR> = vec![0; if want_comment { 65536 } else { 0 }];
+            #[cfg(any(target_os = "linux", target_os = "netbsd"))]
+            let mut data = sys::OpenArchiveDataEx::new(name.as_ptr(), mode);
+            #[cfg(not(any(target_os = "linux", target_os = "netbsd")))]
+            let mut data = sys::OpenArchiveDataEx::new(name.as_ptr(), mode);
+            if want_comment {
+                data.comment_buffer_w = cmt.as_mut_ptr();
+                data.comment_buffer_size = cmt.len() as c_uint;
+            }
+            if keep_broken {
+                data.op_flags = sys::ROADOF_KEEPBROKEN;
+            }
+            // SAFETY: `data` and the buffers it points to outlive the call.
+            let handle = unsafe { sys::RAROpenArchiveEx(&data) };
+            let result = data.open_result as c_int;
+            if handle.is_null() {
+                return Err(fail(result));
+            }
+            // From here the Drop impl closes the handle, also on the error path.
+            let flags_raw = data.flags;
+            let cmt_size = data.comment_size;
+            let cmt_state = data.comment_state;
+            let mut arc = Arc {
+                handle,
+                cb,
+                flags: Flags {
+                    volume: flags_raw & sys::ROADF_VOLUME != 0,
+                    locked: flags_raw & sys::ROADF_LOCK != 0,
+                    solid: flags_raw & sys::ROADF_SOLID != 0,
+                    recovery: flags_raw & sys::ROADF_RECOVERY != 0,
+                    enc_headers: flags_raw & sys::ROADF_ENCHEADERS != 0,
+                    has_comment: flags_raw & sys::ROADF_COMMENT != 0,
+                },
+                comment: None,
+            };
+            if result != sys::ERAR_SUCCESS {
+                return Err(Fail {
+                    code: result,
+                    when: When::Open,
+                    volume: arc.cb.next_volume.take(),
+                });
+            }
+            if cmt_state == 1 || cmt_state == sys::ERAR_SMALL_BUF as c_uint {
+                let n = (cmt_size as usize).min(cmt.len());
+                // SAFETY: the library wrote at most `n` units and a terminating NUL into `cmt`.
+                arc.comment = Some(unsafe { wide_to_string(cmt.as_ptr(), n) });
+            }
+            // Set after opening: a callback present during open is asked for the
+            // password of encrypted headers and answers "none".
+            // SAFETY: valid handle; `cb` is heap-allocated and lives as long as the handle.
+            unsafe {
+                sys::RARSetCallback(
+                    arc.handle,
+                    Some(callback),
+                    &*arc.cb as *const CbState as sys::LPARAM,
+                )
+            };
+            if let Some(pw) = pw {
+                // SAFETY: valid handle and NUL-terminated string; the library copies it.
+                unsafe { sys::RARSetPassword(arc.handle, pw.as_ptr()) };
+            }
+            Ok(arc)
+        }
+
+        fn fail(&self, code: c_int, when: When) -> Fail {
+            Fail {
+                code,
+                when,
+                volume: self.cb.next_volume.take(),
+            }
+        }
+
+        pub fn read_header(&mut self) -> Result<Option<Header>, Fail> {
+            // SAFETY: all-zero is a valid HeaderDataEx (integers and null pointers).
+            let hd: Box<sys::HeaderDataEx> = Box::new(unsafe { std::mem::zeroed() });
+            // SAFETY: valid handle, valid output struct.
+            let code = unsafe { sys::RARReadHeaderEx(self.handle, &*hd) };
+            if code == sys::ERAR_END_ARCHIVE {
+                return Ok(None);
+            }
+            if code != sys::ERAR_SUCCESS {
+                return Err(self.fail(code, When::Read));
+            }
+            // Packed struct: copy scalars out by value, never take references.
+            let flags = hd.flags;
+            let (lo, hi) = (hd.unp_size, hd.unp_size_high);
+            let (ml, mh) = (hd.mtime_low, hd.mtime_high);
+            let win = ((mh as u64) << 32) | ml as u64;
+            // SAFETY: `filename_w` is a NUL-terminated array inside the struct.
+            let filename =
+                unsafe { wide_to_string(&raw const hd.filename_w as *const sys::WCHAR, 1024) };
+            Ok(Some(Header {
+                filename,
+                is_dir: flags & sys::RHDF_DIRECTORY != 0,
+                encrypted: flags & sys::RHDF_ENCRYPTED != 0,
+                unpacked_size: ((hi as u64) << 32) | lo as u64,
+                crc: hd.file_crc,
+                attr: hd.file_attr,
+                host_unix: hd.host_os == 1,
+                redir_type: hd.redir_type,
+                mtime: (win != 0).then(|| (win / 10_000_000) as i64 - 11_644_473_600),
+            }))
+        }
+
+        /// Processes the entry whose header was just read. `dest` is the exact file to
+        /// write (only for `OP_EXTRACT`); the library's own directory logic is not used.
+        pub fn process(&mut self, op: c_int, dest: Option<&Path>) -> Result<(), Fail> {
+            let dest = match dest {
+                Some(d) => {
+                    Some(os_path(d).ok_or_else(|| self.fail(sys::ERAR_ECREATE, When::Process))?)
+                }
+                None => None,
+            };
+            let dp = dest.as_ref().map_or(std::ptr::null(), |d| d.as_ptr());
+            #[cfg(any(target_os = "linux", target_os = "netbsd"))]
+            // SAFETY: valid handle; `dp` is null or NUL-terminated and outlives the call.
+            let code = unsafe { sys::RARProcessFile(self.handle, op, std::ptr::null(), dp) };
+            #[cfg(not(any(target_os = "linux", target_os = "netbsd")))]
+            // SAFETY: as above, wide variant.
+            let code = unsafe { sys::RARProcessFileW(self.handle, op, std::ptr::null(), dp) };
+            if code == sys::ERAR_SUCCESS {
+                Ok(())
+            } else {
+                Err(self.fail(code, When::Process))
+            }
+        }
+    }
+}
 
 pub struct RarEngine {
     path: PathBuf,
@@ -24,53 +337,74 @@ impl RarEngine {
         }
     }
 
-    fn archive<'a>(&'a self, pw: Option<&'a Password>) -> Result<Archive<'a>, ArchiveError> {
-        let a = match pw {
-            // UnRAR copies the password into a C string; a NUL cannot be represented.
-            Some(p) if p.contains('\0') => return Err(ArchiveError::WrongPassword),
-            Some(p) => Archive::with_password(&self.path, p.as_str()),
-            None => Archive::new(&self.path),
-        };
-        Ok(a.as_first_part())
+    /// Volume 1 of a multi-volume set (the opened path itself otherwise).
+    fn first_part(&self) -> PathBuf {
+        Archive::new(&self.path).first_part()
     }
 
-    fn open_listing(
+    fn open(
         &self,
+        mode: u32,
         pw: Option<&Password>,
-    ) -> Result<OpenArchive<List, CursorBeforeHeader>, ArchiveError> {
-        self.archive(pw)?
-            .open_for_listing()
-            .map_err(|e| self.map_err(&e))
+        keep_broken: bool,
+        want_comment: bool,
+    ) -> Result<Arc, ArchiveError> {
+        Arc::open(
+            &self.first_part(),
+            mode,
+            pw.map(|p| p.as_str()),
+            keep_broken,
+            want_comment,
+        )
+        .map_err(|f| self.map_err(f))
     }
 
-    fn open_processing(
-        &self,
-        pw: Option<&Password>,
-    ) -> Result<OpenArchive<Process, CursorBeforeHeader>, ArchiveError> {
-        self.archive(pw)?
-            .open_for_processing()
-            .map_err(|e| self.map_err(&e))
-    }
-
-    fn map_err(&self, e: &UnrarError) -> ArchiveError {
-        match e.code {
-            Code::MissingPassword => ArchiveError::PasswordRequired,
-            Code::BadPassword => ArchiveError::WrongPassword,
-            Code::BadData | Code::BadArchive => ArchiveError::Corrupt(e.to_string()),
-            Code::UnknownFormat => ArchiveError::NotAnArchive,
-            Code::EOpen if e.when != When::Open => match self.missing_volume() {
-                Some(name) => ArchiveError::MissingVolume(name),
-                None => ArchiveError::Io(e.to_string()),
-            },
-            Code::LargeDict | Code::EReference => ArchiveError::Unsupported(e.to_string()),
-            _ => ArchiveError::Io(e.to_string()),
+    fn map_err(&self, f: Fail) -> ArchiveError {
+        match f.code {
+            ffi::ERR_MISSING_PASSWORD => ArchiveError::PasswordRequired,
+            ffi::ERR_BAD_PASSWORD => ArchiveError::WrongPassword,
+            ffi::ERR_BAD_DATA | ffi::ERR_BAD_ARCHIVE => ArchiveError::Corrupt(
+                match f.when {
+                    When::Open => "archive header damaged",
+                    When::Read => "file header damaged",
+                    When::Process => "file data damaged (CRC error)",
+                }
+                .into(),
+            ),
+            ffi::ERR_UNKNOWN_FORMAT => ArchiveError::NotAnArchive,
+            ffi::ERR_EOPEN => {
+                let first = self.first_part();
+                let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+                if f.when == When::Open {
+                    // Opening `partN` redirects to part 1; if that is absent say so.
+                    if std::fs::symlink_metadata(&first).is_err()
+                        && Archive::new(&self.path).is_multipart()
+                    {
+                        if let Some(n) = name(&first) {
+                            return ArchiveError::MissingVolume(n);
+                        }
+                    }
+                    return ArchiveError::Io("could not open archive".into());
+                }
+                let from_cb = f
+                    .volume
+                    .and_then(|v| name(Path::new(&v)).filter(|n| !n.is_empty()));
+                match from_cb.or_else(|| self.missing_volume()) {
+                    Some(n) => ArchiveError::MissingVolume(n),
+                    None => ArchiveError::Io("could not open next volume".into()),
+                }
+            }
+            ffi::ERR_LARGE_DICT | ffi::ERR_EREFERENCE => {
+                ArchiveError::Unsupported(format!("unrar error {}", f.code))
+            }
+            c => ArchiveError::Io(format!("unrar error {c}")),
         }
     }
 
-    /// File name of the first volume after part 1 that is absent from disk.
+    /// File name of the first volume (from 1) that is absent from disk.
     fn missing_volume(&self) -> Option<String> {
         let a = Archive::new(&self.path);
-        (2..=9999).find_map(|n| {
+        (1..=9999).find_map(|n| {
             let p = a.nth_part(n)?;
             if std::fs::symlink_metadata(&p).is_ok() {
                 None
@@ -80,20 +414,21 @@ impl RarEngine {
         })
     }
 
-    /// Re-opens the archive and moves past the first `n` entries (after a failure
-    /// consumed the previous handle).
+    /// Re-opens the archive positioned after the first `n` entries (a failed
+    /// extraction leaves the handle in an unknown state).
     fn reopen_after(
         &self,
         pw: Option<&Password>,
+        keep_broken: bool,
         n: usize,
-    ) -> Result<OpenArchive<Process, CursorBeforeHeader>, ArchiveError> {
-        let mut ar = self.open_processing(pw)?;
+    ) -> Result<Arc, ArchiveError> {
+        let mut ar = self.open(ffi::OM_EXTRACT, pw, keep_broken, false)?;
         for _ in 0..n {
-            let h = ar
-                .read_header()
-                .map_err(|e| self.map_err(&e))?
+            ar.read_header()
+                .map_err(|f| self.map_err(f))?
                 .ok_or_else(|| ArchiveError::Corrupt("unexpected end of archive".into()))?;
-            ar = h.skip().map_err(|e| self.map_err(&e))?;
+            ar.process(ffi::OP_SKIP, None)
+                .map_err(|f| self.map_err(f))?;
         }
         Ok(ar)
     }
@@ -112,42 +447,47 @@ impl RarEngine {
             .filter(|e| !e.is_dir && wanted(&e.path))
             .map(|e| e.size)
             .sum();
+        let keep_broken = req.is_some_and(|r| r.keep_broken);
 
         let mut report = OpReport::default();
         let mut done = 0u64;
-        let mut index = 0usize; // headers consumed from the current handle's start
-        let mut ar = self.open_processing(pw)?;
+        let mut index = 0usize; // headers consumed so far
+        let mut ar = self.open(ffi::OM_EXTRACT, pw, keep_broken, false)?;
         loop {
             if ctl.cancelled() {
                 return Err(ArchiveError::Cancelled);
             }
-            let Some(h) = ar.read_header().map_err(|e| self.map_err(&e))? else {
+            let Some(h) = ar.read_header().map_err(|f| self.map_err(f))? else {
                 break;
             };
             index += 1;
-            let entry = to_entry(h.entry());
+            let entry = to_entry(&h);
+            let skip = |ar: &mut Arc| ar.process(ffi::OP_SKIP, None).map_err(|f| self.map_err(f));
             if !wanted(&entry.path) {
-                ar = h.skip().map_err(|e| self.map_err(&e))?;
+                skip(&mut ar)?;
                 continue;
             }
-            if is_link(h.entry()) {
+            // Extraction only: links and file references are refused outright.
+            if req.is_some() && is_redirect(&h) {
                 report.failed.push(FileFailure {
                     path: entry.path.clone(),
-                    error: ArchiveError::Unsupported("symbolic link".into()),
+                    error: ArchiveError::Unsupported("link".into()),
                 });
-                ar = h.skip().map_err(|e| self.map_err(&e))?;
+                skip(&mut ar)?;
                 continue;
             }
             ctl.progress(&entry.path, done, total);
 
-            let attempt: Result<OpenArchive<Process, CursorBeforeHeader>, ArchiveError> = match req
-            {
+            // `Ok(None)`: handled, move on. `Ok(Some(())))`: file processed.
+            let attempt: Result<(), (ArchiveError, bool)> = match req {
                 // Test mode: verify files, nothing is written.
                 None if entry.is_dir => {
-                    ar = h.skip().map_err(|e| self.map_err(&e))?;
+                    skip(&mut ar)?;
                     continue;
                 }
-                None => h.test().map_err(|e| self.map_err(&e)),
+                None => ar
+                    .process(ffi::OP_TEST, None)
+                    .map_err(|f| (self.map_err(f), true)),
                 Some(req) => {
                     let plan = match plan_entry(&entry, req, ctl) {
                         Ok(p) => p,
@@ -156,7 +496,7 @@ impl RarEngine {
                                 path: entry.path.clone(),
                                 error: e,
                             });
-                            ar = h.skip().map_err(|e| self.map_err(&e))?;
+                            skip(&mut ar)?;
                             continue;
                         }
                         Err(e) => return Err(e),
@@ -164,46 +504,48 @@ impl RarEngine {
                     match plan {
                         PlanOutcome::Skip => {
                             report.skipped += 1;
-                            ar = h.skip().map_err(|e| self.map_err(&e))?;
+                            skip(&mut ar)?;
                             continue;
                         }
                         PlanOutcome::Write(dest) if entry.is_dir => {
                             std::fs::create_dir_all(&dest)?;
                             report.ok += 1;
-                            ar = h.skip().map_err(|e| self.map_err(&e))?;
+                            skip(&mut ar)?;
                             continue;
                         }
                         PlanOutcome::Write(dest) => {
-                            let mut slot = Some(h);
-                            let mut next = None;
+                            let mut extract_failed = false;
                             write_via_temp(&dest, req.keep_broken, |tmp| {
-                                match slot.take().expect("handle").extract_to(tmp) {
-                                    Ok(a) => {
-                                        next = Some(a);
-                                        Ok(())
+                                if let Err(f) = ar.process(ffi::OP_EXTRACT, Some(tmp)) {
+                                    extract_failed = true;
+                                    let e = self.map_err(f);
+                                    // Only damaged data is worth keeping, never a
+                                    // half-decrypted file or the like.
+                                    if !matches!(e, ArchiveError::Corrupt(_)) {
+                                        let _ = std::fs::remove_file(tmp);
                                     }
-                                    Err(e) => Err(self.map_err(&e)),
+                                    return Err(e);
                                 }
+                                ensure_plain_file(tmp)
                             })
-                            .map(|()| next.expect("extract_to returned a handle"))
+                            .map_err(|e| (e, extract_failed))
                         }
                     }
                 }
             };
             match attempt {
-                Ok(next) => {
-                    ar = next;
+                Ok(()) => {
                     report.ok += 1;
                     done += entry.size;
                 }
-                // A damaged file consumes the handle; record it, then carry on
-                // with the entries after it.
-                Err(error @ ArchiveError::Corrupt(_)) => {
+                // A damaged file leaves the handle in an unknown state: record it,
+                // then carry on with the entries after it on a fresh handle.
+                Err((error @ ArchiveError::Corrupt(_), true)) => {
                     report.failed.push(FileFailure {
                         path: entry.path.clone(),
                         error,
                     });
-                    match self.reopen_after(pw, index) {
+                    match self.reopen_after(pw, keep_broken, index) {
                         Ok(a) => ar = a,
                         Err(error) => {
                             report.failed.push(FileFailure {
@@ -214,75 +556,88 @@ impl RarEngine {
                         }
                     }
                 }
-                Err(e) => return Err(e),
+                // Extracted fine but the result was not a plain file (defence in
+                // depth against redirects): the temp file is gone, go on.
+                Err((error @ ArchiveError::Unsupported(_), false)) => {
+                    report.failed.push(FileFailure {
+                        path: entry.path.clone(),
+                        error,
+                    });
+                }
+                Err((e, _)) => return Err(e),
             }
         }
         Ok(report)
     }
 
     fn list_inner(&self, pw: Option<&Password>) -> Result<(ArchiveInfo, Vec<Entry>), ArchiveError> {
-        let mut ar = self.open_listing(pw)?;
+        let mut ar = self.open(ffi::OM_LIST, pw, false, false)?;
+        if ar.flags.has_comment {
+            // Only archives with plain headers can have a readable comment here.
+            ar = self.open(ffi::OM_LIST, pw, false, true)?;
+        }
         let info = ArchiveInfo {
             format: Format::Rar,
             file_size: std::fs::metadata(&self.path)?.len(),
-            encrypted_headers: ar.has_encrypted_headers(),
-            solid: ar.is_solid(),
-            multi_volume: ar.volume_info() != VolumeInfo::None,
-            has_recovery: ar.has_recovery_record(),
-            locked: ar.is_locked(),
-            // The UnRAR library only exposes that a comment exists, not its text.
-            comment: ar.has_comment().then(String::new),
+            encrypted_headers: ar.flags.enc_headers,
+            solid: ar.flags.solid,
+            multi_volume: ar.flags.volume,
+            has_recovery: ar.flags.recovery,
+            locked: ar.flags.locked,
+            comment: if ar.flags.has_comment {
+                Some(ar.comment.clone().unwrap_or_default())
+            } else {
+                None
+            },
         };
         let mut entries = vec![];
-        while let Some(h) = ar.read_header().map_err(|e| self.map_err(&e))? {
-            entries.push(to_entry(h.entry()));
-            ar = h.skip().map_err(|e| self.map_err(&e))?;
+        while let Some(h) = ar.read_header().map_err(|f| self.map_err(f))? {
+            entries.push(to_entry(&h));
+            ar.process(ffi::OP_SKIP, None)
+                .map_err(|f| self.map_err(f))?;
         }
         Ok((info, entries))
     }
 }
 
-fn entry_path(h: &FileHeader) -> String {
-    normalize_entry_path(&h.filename.to_string_lossy())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-fn to_entry(h: &FileHeader) -> Entry {
+fn to_entry(h: &Header) -> Entry {
     Entry {
-        path: entry_path(h),
-        is_dir: h.is_directory(),
-        size: if h.is_directory() { 0 } else { h.unpacked_size },
+        path: normalize_entry_path(&h.filename)
+            .trim_end_matches('/')
+            .to_string(),
+        is_dir: h.is_dir,
+        size: if h.is_dir { 0 } else { h.unpacked_size },
         packed: None,
-        modified: dos_to_unix(h.file_time),
+        modified: h.mtime,
         // RAR5 stores a keyed hash instead of the CRC for encrypted files.
-        crc: (!h.is_directory() && !h.is_encrypted()).then_some(h.file_crc),
-        encrypted: h.is_encrypted(),
+        crc: (!h.is_dir && !h.encrypted).then_some(h.crc),
+        encrypted: h.encrypted,
     }
 }
 
-/// Unix hosts store the mode in `file_attr`; S_IFLNK marks a symbolic link.
-fn is_link(h: &FileHeader) -> bool {
-    h.file_attr & 0o170000 == 0o120000
+/// Symbolic links, hard links and file references. The authoritative signal is the
+/// redirect record (`redir_type`); the Unix mode bits are only a second opinion,
+/// because the attributes alone can be forged to look like a regular file.
+fn is_redirect(h: &Header) -> bool {
+    h.redir_type != 0 || (h.host_unix && h.attr & 0o170000 == 0o120000)
 }
 
-/// MS-DOS date/time (as returned by the UnRAR library), read as UTC.
-fn dos_to_unix(t: u32) -> Option<i64> {
-    let (date, time) = ((t >> 16) as i64, (t & 0xFFFF) as i64);
-    let (year, month, day) = (1980 + (date >> 9), (date >> 5) & 0xF, date & 0x1F);
-    let (hour, min, sec) = (time >> 11, (time >> 5) & 0x3F, (time & 0x1F) * 2);
-    if t == 0 || !(1..=12).contains(&month) || day == 0 || hour > 23 || min > 59 || sec > 59 {
-        return None;
+/// Second layer: what UnRAR left at the temp path must be a plain file with a
+/// single name. Otherwise it is removed (the link itself, never its target).
+fn ensure_plain_file(p: &Path) -> Result<(), ArchiveError> {
+    let m = std::fs::symlink_metadata(p)?;
+    #[cfg(unix)]
+    let single = {
+        use std::os::unix::fs::MetadataExt;
+        m.nlink() == 1
+    };
+    #[cfg(not(unix))]
+    let single = true;
+    if m.is_file() && single {
+        return Ok(());
     }
-    // Days from civil (Howard Hinnant).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    Some(days * 86400 + hour * 3600 + min * 60 + sec)
+    let _ = std::fs::remove_file(p);
+    Err(ArchiveError::Unsupported("link".into()))
 }
 
 impl ArchiveEngine for RarEngine {
@@ -393,7 +748,8 @@ mod tests {
         for d in ["belgeler", "belgeler/alt", "türkçe ğüşıöç"] {
             assert!(get(d).is_dir, "{d}");
         }
-        assert!(get("kok.txt").modified.unwrap() > 1_700_000_000);
+        // make-fixtures.sh sets every mtime to 2020-01-02 03:04:05 UTC.
+        assert_eq!(get("kok.txt").modified, Some(1_577_934_245));
         assert!(get("kok.txt").crc.is_some());
         assert!(get("kok.txt").packed.is_none());
     }
@@ -630,9 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_corrupt_keep_broken_cannot_keep_unrar_deletes_bad_output() {
-        // UnRAR removes a file that fails its CRC before we get control back, so
-        // keep_broken has nothing to keep; what matters is that nothing is left half-written.
+    fn extract_corrupt_keep_broken_keeps_the_file() {
         let dest = tempfile::tempdir().unwrap();
         let mut r = req(dest.path());
         r.keep_broken = true;
@@ -640,7 +994,9 @@ mod tests {
             .extract(None, &r, &mut ctl())
             .unwrap();
         assert_eq!(rep.failed.len(), 1);
-        assert!(!dest.path().join("belgeler/rapor.txt").exists());
+        let kept = dest.path().join("belgeler/rapor.txt");
+        assert_eq!(fs::read(&kept).unwrap().len(), 14);
+        assert_ne!(fs::read(&kept).unwrap(), b"rapor icerigi\n");
         assert!(!walk(dest.path()).iter().any(|p| p.contains("ambar-part")));
     }
 
@@ -666,7 +1022,7 @@ mod tests {
         let plain = info("plain5.rar");
         assert!(!plain.solid && !plain.locked && !plain.has_recovery && !plain.multi_volume);
         assert!(plain.comment.is_none());
-        assert!(info("comment.rar").comment.is_some());
+        assert_eq!(info("comment.rar").comment.as_deref(), Some("yorum"));
         assert!(info("locked.rar").locked);
         assert!(info("recovery.rar").has_recovery);
         assert!(info("solid.rar").solid);
@@ -705,22 +1061,219 @@ mod tests {
     }
 
     #[test]
-    fn extract_to_writes_exactly_the_given_path() {
+    fn extract_writes_exactly_the_given_path() {
         let dest = tempfile::tempdir().unwrap();
         let target = dest.path().join("tam-bu.tmp");
-        let ar = unrar_ng::Archive::new(&fixture("plain5.rar"))
-            .open_for_processing()
-            .unwrap();
-        let mut ar = ar;
+        let mut ar =
+            ffi::Arc::open(&fixture("plain5.rar"), ffi::OM_EXTRACT, None, false, false).unwrap();
         loop {
             let h = ar.read_header().unwrap().unwrap();
-            if h.entry().filename == Path::new("kok.txt") {
-                h.extract_to(&target).unwrap();
+            if h.filename == "kok.txt" {
+                ar.process(ffi::OP_EXTRACT, Some(&target)).unwrap();
                 break;
             }
-            ar = h.skip().unwrap();
+            ar.process(ffi::OP_SKIP, None).unwrap();
         }
         assert_eq!(walk(dest.path()), vec!["tam-bu.tmp".to_string()]);
         assert_eq!(fs::read_to_string(&target).unwrap(), "kok\n");
+    }
+
+    /// A file in the working directory that a hard link / file reference would
+    /// resolve to; removed on drop. Tests only read it, so sharing the CWD is safe.
+    struct CwdBait(PathBuf);
+    impl CwdBait {
+        fn new(name: &str) -> CwdBait {
+            let p = std::env::current_dir().unwrap().join(name);
+            fs::write(&p, "COLLIDING FILE IN CWD").unwrap();
+            CwdBait(p)
+        }
+    }
+    impl Drop for CwdBait {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn assert_redirect_refused(archive: &str, bait: &str, link: &str, others: &[&str]) {
+        let bait = CwdBait::new(bait);
+        let dest = tempfile::tempdir().unwrap();
+        let rep = RarEngine::new(&fixture(archive))
+            .extract(None, &req(dest.path()), &mut ctl())
+            .unwrap();
+        assert_eq!(rep.failed.len(), 1, "{:?}", rep.failed);
+        assert_eq!(rep.failed[0].path, link);
+        assert!(matches!(rep.failed[0].error, ArchiveError::Unsupported(_)));
+        // The entries around the link still extract; the report is kept.
+        let mut want: Vec<String> = others.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(files_only(dest.path()), want);
+        assert_eq!(rep.ok, others.len() as u64);
+        assert!(!dest.path().join(link).exists());
+        // The bait in the working directory was neither linked nor overwritten.
+        assert_eq!(
+            fs::read_to_string(&bait.0).unwrap(),
+            "COLLIDING FILE IN CWD"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(&bait.0).unwrap().nlink(), 1);
+        }
+    }
+
+    #[test]
+    fn hard_link_entry_is_failed_and_cwd_untouched() {
+        assert_redirect_refused(
+            "hardlink.rar",
+            "ambar-hl-src.txt",
+            "ambar-hl-link.txt",
+            &["ambar-hl-src.txt", "ambar-hl-after.txt"],
+        );
+    }
+
+    #[test]
+    fn file_reference_entry_is_failed_and_cwd_untouched() {
+        assert_redirect_refused(
+            "fileref.rar",
+            "ambar-ref-a.txt",
+            "ambar-ref-b.txt",
+            &["ambar-ref-a.txt", "ambar-ref-after.txt"],
+        );
+    }
+
+    #[test]
+    fn test_mode_tests_links_instead_of_failing_them() {
+        for (name, ok) in [("symlink.rar", 2), ("hardlink.rar", 3), ("fileref.rar", 3)] {
+            let rep = RarEngine::new(&fixture(name))
+                .test(None, &mut ctl())
+                .unwrap();
+            assert!(rep.failed.is_empty(), "{name}: {:?}", rep.failed);
+            assert_eq!(rep.ok, ok, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disguised_symlink_is_refused_even_when_flattened() {
+        // Mode bits say "regular file"; only the redirect record says symlink.
+        let (_, entries) = RarEngine::new(&fixture("symlink-disguised.rar"))
+            .list(None)
+            .unwrap();
+        assert!(entries.iter().any(|e| e.path == "a/b/l"));
+        let dest = tempfile::tempdir().unwrap();
+        let mut r = req(dest.path());
+        r.keep_paths = false;
+        let rep = RarEngine::new(&fixture("symlink-disguised.rar"))
+            .extract(None, &r, &mut ctl())
+            .unwrap();
+        assert_eq!(rep.failed.len(), 1, "{:?}", rep.failed);
+        assert_eq!(rep.failed[0].path, "a/b/l");
+        assert!(matches!(rep.failed[0].error, ArchiveError::Unsupported(_)));
+        assert_eq!(files_only(dest.path()), vec!["kok.txt".to_string()]);
+        assert!(fs::symlink_metadata(dest.path().join("l")).is_err());
+        assert!(fs::symlink_metadata(dest.path().join("ESCAPED")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_plain_file_rejects_symlink_and_hard_link() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        fs::write(&real, "x").unwrap();
+        assert!(ensure_plain_file(&real).is_ok());
+        let sym = d.path().join("sym");
+        std::os::unix::fs::symlink(&real, &sym).unwrap();
+        assert!(matches!(
+            ensure_plain_file(&sym),
+            Err(ArchiveError::Unsupported(_))
+        ));
+        assert!(fs::symlink_metadata(&sym).is_err());
+        let hard = d.path().join("hard");
+        fs::hard_link(&real, &hard).unwrap();
+        assert!(matches!(
+            ensure_plain_file(&hard),
+            Err(ArchiveError::Unsupported(_))
+        ));
+        // Only the extra name is removed, never the target.
+        assert_eq!(fs::read_to_string(&real).unwrap(), "x");
+    }
+
+    #[test]
+    fn missing_part1_reports_missing_volume() {
+        let src = tempfile::tempdir().unwrap();
+        fs::copy(
+            fixture("multi.part2.rar"),
+            src.path().join("multi.part2.rar"),
+        )
+        .unwrap();
+        let r = RarEngine::new(&src.path().join("multi.part2.rar")).list(None);
+        match r {
+            Err(ArchiveError::MissingVolume(n)) => assert_eq!(n, "multi.part1.rar"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn keep_paths_false_flattens_into_dest() {
+        let dest = tempfile::tempdir().unwrap();
+        let mut r = req(dest.path());
+        r.keep_paths = false;
+        RarEngine::new(&fixture("plain5.rar"))
+            .extract(None, &r, &mut ctl())
+            .unwrap();
+        assert_eq!(
+            files_only(dest.path()),
+            vec!["kok.txt", "notlar.txt", "rapor.txt", "😀.txt"]
+        );
+    }
+
+    #[test]
+    fn rename_policy_keeps_both_files() {
+        let dest = tempfile::tempdir().unwrap();
+        fs::write(dest.path().join("kok.txt"), "benim").unwrap();
+        let mut r = req(dest.path());
+        r.overwrite = OverwritePolicy::Rename;
+        RarEngine::new(&fixture("plain5.rar"))
+            .extract(None, &r, &mut ctl())
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dest.path().join("kok.txt")).unwrap(),
+            "benim"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.path().join("kok (1).txt")).unwrap(),
+            "kok\n"
+        );
+    }
+
+    #[test]
+    fn ask_policy_follows_the_choice() {
+        for (choice, kept, skipped) in [
+            (ConflictChoice::Skip, "benim", 1),
+            (ConflictChoice::Overwrite, "kok\n", 0),
+        ] {
+            let dest = tempfile::tempdir().unwrap();
+            fs::write(dest.path().join("kok.txt"), "benim").unwrap();
+            let mut r = req(dest.path());
+            r.overwrite = OverwritePolicy::Ask;
+            let mut c = ctl();
+            c.choice = choice;
+            let rep = RarEngine::new(&fixture("plain5.rar"))
+                .extract(None, &r, &mut c)
+                .unwrap();
+            assert_eq!(rep.skipped, skipped);
+            assert_eq!(
+                fs::read_to_string(dest.path().join("kok.txt")).unwrap(),
+                kept
+            );
+        }
+        let dest = tempfile::tempdir().unwrap();
+        fs::write(dest.path().join("kok.txt"), "benim").unwrap();
+        let mut r = req(dest.path());
+        r.overwrite = OverwritePolicy::Ask;
+        let mut c = ctl();
+        c.choice = ConflictChoice::Cancel;
+        let res = RarEngine::new(&fixture("plain5.rar")).extract(None, &r, &mut c);
+        assert!(matches!(res, Err(ArchiveError::Cancelled)), "{res:?}");
     }
 }
