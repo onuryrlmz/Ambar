@@ -175,11 +175,11 @@ impl SevenZEngine {
             report: OpReport::default(),
             done: 0,
             total: 0,
+            block_damaged: false,
         };
         run.total = (0..metas.len())
             .filter(|&i| run.is_work(i) && !metas[i].link && !metas[i].entry.is_dir)
-            .map(|i| metas[i].entry.size)
-            .sum();
+            .fold(0u64, |a, i| a.saturating_add(metas[i].entry.size));
         if pw.is_none()
             && (0..metas.len())
                 .any(|i| run.is_work(i) && !metas[i].link && metas[i].entry.encrypted)
@@ -191,10 +191,11 @@ impl SevenZEngine {
             let start = archive.stream_map.block_first_file_index[b];
             let dec = BlockDecoder::new(1, b, &archive, &spw, &mut file);
             // Nothing wanted in this block: do not decode it.
-            if !(start..start + dec.entry_count()).any(|i| run.is_work(i)) {
+            if req.is_some() && !(start..start + dec.entry_count()).any(|i| run.is_work(i)) {
                 continue;
             }
             let failed_before = run.report.failed.len();
+            run.block_damaged = false;
             let mut cur = start;
             let mut fatal = None;
             let res = dec.for_each_entries(&mut |_, data| {
@@ -230,6 +231,7 @@ impl SevenZEngine {
             }
         }
         // Entries without data (empty files, folders) are not part of any block.
+        run.block_damaged = false;
         for i in 0..metas.len() {
             if archive.stream_map.file_block_index[i].is_none() {
                 run.handle(i, &mut std::io::empty())?;
@@ -246,6 +248,8 @@ struct Run<'a> {
     report: OpReport,
     done: u64,
     total: u64,
+    /// A read failed earlier in the block being decoded.
+    block_damaged: bool,
 }
 
 impl Run<'_> {
@@ -265,6 +269,20 @@ impl Run<'_> {
         });
     }
 
+    /// Reads and drops the rest of an entry, polling cancel. A read error means the
+    /// data behind it in the same block cannot be trusted: it is returned, and the
+    /// block is marked damaged.
+    fn drain(&mut self, data: &mut dyn Read) -> Result<Option<ArchiveError>, ArchiveError> {
+        match skip_stream(data, "", self.ctl) {
+            Ok(()) => Ok(None),
+            Err(ArchiveError::Cancelled) => Err(ArchiveError::Cancelled),
+            Err(e) => {
+                self.block_damaged = true;
+                Ok(Some(e))
+            }
+        }
+    }
+
     /// Handles one entry; `Err` ends the whole run.
     fn handle(&mut self, idx: usize, data: &mut dyn Read) -> Result<(), ArchiveError> {
         let metas = self.metas;
@@ -279,22 +297,42 @@ impl Run<'_> {
             inner: data,
             left: if entry.is_dir { 0 } else { entry.size },
         };
-        let unwanted = entry.path.is_empty()
-            || m.anti
-            || !self
-                .req
-                .is_none_or(|r| is_selected(&entry.path, &r.selection));
+        let named = if entry.path.is_empty() {
+            format!("#{idx}")
+        } else {
+            entry.path.clone()
+        };
+        let selected = self
+            .req
+            .is_none_or(|r| is_selected(&entry.path, &r.selection));
+        let unwanted = entry.path.is_empty() || m.anti || !selected;
         if unwanted || m.link {
-            if m.link && !unwanted && self.req.is_some() {
+            let link_failed = m.link && !unwanted && self.req.is_some();
+            if link_failed {
                 self.fail(&entry.path, ArchiveError::Unsupported("link".into()));
             }
-            // Read what the crate would skip itself, so that cancel is polled.
-            if let Err(ArchiveError::Cancelled) = skip_stream(&mut data, "", self.ctl) {
-                return Err(ArchiveError::Cancelled);
+            // Read what the crate would skip itself, so that cancel is polled. A read
+            // error counts unless the data is truly unselected (or already failed).
+            if let Some(e) = self.drain(&mut data)? {
+                if !link_failed && (self.req.is_none() || selected) {
+                    self.fail(&named, e);
+                }
             }
             return Ok(());
         }
         let data: &mut dyn Read = &mut data;
+        // Earlier data of this block failed: only a CRC of its own can vouch for this one.
+        if self.block_damaged && entry.crc.is_none() && !entry.is_dir && entry.size > 0 {
+            let _ = self.drain(&mut *data)?;
+            if entry.encrypted {
+                return Err(ArchiveError::WrongPassword);
+            }
+            self.fail(
+                &entry.path,
+                ArchiveError::Corrupt("follows damaged data in the same block".into()),
+            );
+            return Ok(());
+        }
         self.ctl.progress(&entry.path, self.done, self.total);
         let (done, total) = (self.done, self.total);
         let result = match self.req {
@@ -305,6 +343,7 @@ impl Run<'_> {
                     Ok(p) => p,
                     Err(e @ (ArchiveError::UnsafePath(_) | ArchiveError::DestConflict(_))) => {
                         self.fail(&entry.path, e);
+                        let _ = self.drain(&mut *data)?;
                         return Ok(());
                     }
                     Err(e) => return Err(e),
@@ -312,6 +351,7 @@ impl Run<'_> {
                 match plan {
                     PlanOutcome::Skip => {
                         self.report.skipped += 1;
+                        let _ = self.drain(&mut *data)?;
                         return Ok(());
                     }
                     PlanOutcome::Write(dest) if entry.is_dir => {
@@ -332,10 +372,13 @@ impl Run<'_> {
                 }
             }
         };
+        if matches!(result, Err(ArchiveError::Corrupt(_))) {
+            self.block_damaged = true;
+        }
         match result {
             Ok(()) => {
                 self.report.ok += 1;
-                self.done += entry.size;
+                self.done = self.done.saturating_add(entry.size);
                 Ok(())
             }
             Err(ArchiveError::Corrupt(_)) if entry.encrypted => Err(ArchiveError::WrongPassword),
@@ -961,5 +1004,224 @@ mod tests {
             assert!(rep.failed.is_empty(), "{:?}", rep.failed);
             assert_eq!(fs::read(out.join("f.txt")).unwrap(), b"deflated data");
         }
+    }
+
+    /// Hand-built solid block of two files `a` and `b` (one coder, plain header).
+    /// A CRC of `None` leaves that file without one.
+    fn solid7z(
+        coder: &[u8],
+        packed: &[u8],
+        a_len: u64,
+        b_len: u64,
+        a_crc: Option<u32>,
+        b_crc: Option<u32>,
+    ) -> Vec<u8> {
+        let mut h = vec![1u8, 4, 6];
+        h.extend(num(0));
+        h.extend(num(1));
+        h.push(9);
+        h.extend(num(packed.len() as u64));
+        h.push(0);
+        h.extend([7u8, 0x0B]);
+        h.extend(num(1));
+        h.push(0);
+        h.extend(num(1));
+        h.extend(coder);
+        h.push(0x0C);
+        h.extend(num(a_len + b_len));
+        h.push(0);
+        h.push(8);
+        h.extend([0x0D]);
+        h.extend(num(2));
+        h.push(9);
+        h.extend(num(a_len));
+        let crcs = [a_crc, b_crc];
+        if crcs.iter().any(Option::is_some) {
+            h.extend([0x0A, 0]);
+            let mut bits = 0u8;
+            for (i, c) in crcs.iter().enumerate() {
+                if c.is_some() {
+                    bits |= 0x80 >> i;
+                }
+            }
+            h.push(bits);
+            for c in crcs.iter().flatten() {
+                h.extend(c.to_le_bytes());
+            }
+        }
+        h.push(0);
+        h.push(0);
+        h.push(5);
+        h.extend(num(2));
+        let name: Vec<u8> = "a\0b\0"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        h.push(0x11);
+        h.extend(num(name.len() as u64 + 1));
+        h.push(0);
+        h.extend(&name);
+        h.push(0);
+        h.push(0);
+        let mut out = b"7z\xBC\xAF\x27\x1C\x00\x04".to_vec();
+        let mut sh = vec![];
+        sh.extend((packed.len() as u64).to_le_bytes());
+        sh.extend((h.len() as u64).to_le_bytes());
+        sh.extend(crc32fast_like(&h).to_le_bytes());
+        out.extend(crc32fast_like(&sh).to_le_bytes());
+        out.extend(&sh);
+        out.extend(packed);
+        out.extend(&h);
+        out
+    }
+
+    fn delta1(plain: &[u8]) -> Vec<u8> {
+        let mut prev = 0u8;
+        plain
+            .iter()
+            .map(|&b| {
+                let d = b.wrapping_sub(prev);
+                prev = b;
+                d
+            })
+            .collect()
+    }
+
+    #[test]
+    fn damage_reaching_a_crcless_entry_through_an_unselected_one_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_plain = b"AAAAAAAAAAAAAAAA";
+        let b_plain = b"bbbbbbbbbbbbbbbb";
+        let all = [a_plain.as_slice(), b_plain.as_slice()].concat();
+        let delta = [0x21u8, 0x03, 1, 0];
+        let ca = crc32fast_like(a_plain);
+        let cb = crc32fast_like(b_plain);
+        // control: undamaged, b selected, no CRC for b
+        let good = dir.path().join("good.7z");
+        fs::write(
+            &good,
+            solid7z(&delta, &delta1(&all), 16, 16, Some(ca), None),
+        )
+        .unwrap();
+        let mut rq = req(&dir.path().join("o-good"));
+        rq.selection = vec!["b".into()];
+        let rep = SevenZEngine::new(&good)
+            .extract(None, &rq, &mut ctl())
+            .unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+        assert_eq!(fs::read(dir.path().join("o-good/b")).unwrap(), b_plain);
+        // a damaged byte inside a shifts everything after it through the delta coder
+        let mut packed = delta1(&all);
+        packed[3] ^= 0x55;
+        for (name, bcrc) in [("nocrc", None), ("crc", Some(cb))] {
+            let a = dir.path().join(format!("{name}.7z"));
+            fs::write(&a, solid7z(&delta, &packed, 16, 16, Some(ca), bcrc)).unwrap();
+            let out = dir.path().join(format!("o-{name}"));
+            let mut rq = req(&out);
+            rq.selection = vec!["b".into()];
+            let rep = SevenZEngine::new(&a)
+                .extract(None, &rq, &mut ctl())
+                .unwrap();
+            assert_eq!(rep.ok, 0, "{name}: {:?}", rep.failed);
+            assert!(
+                rep.failed
+                    .iter()
+                    .any(|f| f.path == "b" && matches!(f.error, ArchiveError::Corrupt(_))),
+                "{name}: {:?}",
+                rep.failed
+            );
+            assert!(!out.exists() || leftovers(&out).is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_reports_bad_crc_on_link_and_unnamed_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.7z");
+        let symlink = 0x8000 | (0o120777u32 << 16) | 0x20;
+        build(
+            &a,
+            &[
+                ("link", b"/some/target/path", Some(symlink)),
+                ("", b"unnamed-entry-data", None),
+                ("b.txt", b"fine", None),
+            ],
+            &Opts {
+                copy: true,
+                ..Default::default()
+            },
+        );
+        let rep = SevenZEngine::new(&a).test(None, &mut ctl()).unwrap();
+        assert!(rep.failed.is_empty(), "control: {:?}", rep.failed);
+        let mut bytes = fs::read(&a).unwrap();
+        bytes[32] ^= 0xFF; // first byte of the link's data
+        let i = bytes
+            .windows(18)
+            .position(|w| w == b"unnamed-entry-data")
+            .unwrap();
+        bytes[i] ^= 0xFF;
+        fs::write(&a, &bytes).unwrap();
+        let rep = SevenZEngine::new(&a).test(None, &mut ctl()).unwrap();
+        assert_eq!(rep.ok, 1, "{:?}", rep.failed);
+        assert!(
+            rep.failed
+                .iter()
+                .filter(|f| matches!(f.error, ArchiveError::Corrupt(_)))
+                .count()
+                == 2,
+            "{:?}",
+            rep.failed
+        );
+        // extract: the link is still just unsupported, nothing is written for it
+        let out = dir.path().join("out");
+        let rep = SevenZEngine::new(&a)
+            .extract(None, &req(&out), &mut ctl())
+            .unwrap();
+        assert!(rep
+            .failed
+            .iter()
+            .any(|f| f.path == "link" && matches!(f.error, ArchiveError::Unsupported(_))));
+        assert_eq!(leftovers(&out), ["b.txt"]);
+    }
+
+    #[test]
+    fn cancel_is_polled_while_draining_planned_skips() {
+        use crate::engine::PollCtl;
+        use ::sevenz_rust2::SourceReader;
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("s.7z");
+        let mut w = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        w.set_content_methods(vec![EncoderMethod::LZMA2.into()]);
+        w.push_archive_entries(
+            vec![
+                ArchiveEntry::new_file("big.bin"),
+                ArchiveEntry::new_file("z.txt"),
+            ],
+            vec![
+                SourceReader::new(Cursor::new(vec![9u8; 8 * 1024 * 1024])),
+                SourceReader::new(Cursor::new(b"z".to_vec())),
+            ],
+        )
+        .unwrap();
+        fs::write(&s, w.finish().unwrap().into_inner()).unwrap();
+        let out = dir.path().join("o");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("big.bin"), b"mine").unwrap();
+        let mut rq = req(&out);
+        rq.overwrite = OverwritePolicy::Skip;
+        let mut c = PollCtl {
+            calls: std::cell::Cell::new(0),
+            cancel_at: u64::MAX,
+        };
+        let rep = SevenZEngine::new(&s).extract(None, &rq, &mut c).unwrap();
+        assert_eq!(rep.skipped, 1);
+        assert!(c.calls.get() >= 100, "{}", c.calls.get());
+        let mut c = PollCtl {
+            calls: std::cell::Cell::new(0),
+            cancel_at: 20,
+        };
+        let r = SevenZEngine::new(&s).extract(None, &rq, &mut c);
+        assert!(matches!(r, Err(ArchiveError::Cancelled)), "{r:?}");
+        assert_eq!(fs::read(out.join("big.bin")).unwrap(), b"mine");
     }
 }

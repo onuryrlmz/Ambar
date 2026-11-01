@@ -24,6 +24,8 @@ pub struct TarLikeEngine {
     path: PathBuf,
     format: Format,
     cache: Option<(ArchiveInfo, Vec<Entry>)>,
+    /// Bytes of regular files, known once the tar was listed (progress total only).
+    file_total: u64,
 }
 
 /// What an entry is, as far as extraction is concerned.
@@ -81,7 +83,9 @@ fn read_full(r: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
 /// Looks up `key` in a PAX record block (`<len> key=value\n` repeated).
 fn pax_lookup(data: &[u8], key: &str) -> Result<Option<Vec<u8>>, String> {
     let mut found = None;
-    let mut rest = data;
+    // NUL padding after the last record is tolerated.
+    let end = data.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let mut rest = &data[..end];
     while !rest.is_empty() {
         let sp = rest
             .iter()
@@ -94,12 +98,15 @@ fn pax_lookup(data: &[u8], key: &str) -> Result<Option<Vec<u8>>, String> {
         if len <= sp + 1 || len > rest.len() {
             return Err("bad pax record length".into());
         }
-        let rec = &rest[sp + 1..len];
-        let rec = rec.strip_suffix(b"\n").unwrap_or(rec);
-        if let Some(eq) = rec.iter().position(|&b| b == b'=') {
-            if &rec[..eq] == key.as_bytes() {
-                found = Some(rec[eq + 1..].to_vec());
-            }
+        let rec = rest[sp + 1..len]
+            .strip_suffix(b"\n")
+            .ok_or("bad pax record (no newline)")?;
+        let eq = rec
+            .iter()
+            .position(|&b| b == b'=')
+            .ok_or("bad pax record (no '=')")?;
+        if &rec[..eq] == key.as_bytes() {
+            found = Some(rec[eq + 1..].to_vec());
         }
         rest = &rest[len..];
     }
@@ -122,6 +129,7 @@ impl TarLikeEngine {
             path: path.to_path_buf(),
             format,
             cache: None,
+            file_total: 0,
         }
     }
 
@@ -307,6 +315,8 @@ impl TarLikeEngine {
             if let Some(p) = pax.as_deref() {
                 // A PAX size overrides the header size.
                 match pax_lookup(p, "size") {
+                    // An empty value means "unset".
+                    Ok(Some(v)) if v.is_empty() => {}
                     Ok(Some(v)) => {
                         match std::str::from_utf8(&v).ok().and_then(|s| s.parse().ok()) {
                             Some(s) => size = s,
@@ -392,9 +402,13 @@ impl TarLikeEngine {
         }
     }
 
-    fn list_tar(&self) -> Result<Vec<Entry>, ArchiveError> {
+    fn list_tar(&self) -> Result<(Vec<Entry>, u64), ArchiveError> {
         let mut out = Vec::new();
+        let mut total = 0u64;
         let bad = self.stream(&mut NoCtl, &mut |item, _, _| {
+            if item.kind == Kind::File {
+                total = total.saturating_add(item.entry.size);
+            }
             if !item.entry.path.is_empty() {
                 out.push(item.entry);
             }
@@ -402,7 +416,7 @@ impl TarLikeEngine {
         })?;
         match bad {
             Some(msg) => Err(ArchiveError::Corrupt(msg)),
-            None => Ok(out),
+            None => Ok((out, total)),
         }
     }
 
@@ -411,11 +425,7 @@ impl TarLikeEngine {
         req: Option<&ExtractRequest>,
         ctl: &mut dyn JobCtl,
     ) -> Result<OpReport, ArchiveError> {
-        let total: u64 = self
-            .cache
-            .as_ref()
-            .map(|(_, es)| es.iter().map(|e| e.size).sum())
-            .unwrap_or(0);
+        let total = self.file_total;
         let mut report = OpReport::default();
         let mut done = 0u64;
         let bad = self.stream(ctl, &mut |item, data, ctl| {
@@ -471,7 +481,7 @@ impl TarLikeEngine {
             match result {
                 Ok(()) => {
                     report.ok += 1;
-                    done += entry.size;
+                    done = done.saturating_add(entry.size);
                     Ok(Flow::Next)
                 }
                 Err(e @ ArchiveError::Corrupt(_)) => {
@@ -540,7 +550,9 @@ impl ArchiveEngine for TarLikeEngine {
         let entries = if self.single() {
             vec![self.single_entry()]
         } else {
-            self.list_tar()?
+            let (entries, total) = self.list_tar()?;
+            self.file_total = total;
+            entries
         };
         let c = (self.info()?, entries);
         self.cache = Some(c.clone());
@@ -993,6 +1005,108 @@ mod tests {
                 matches!(r, Err(ArchiveError::Cancelled)),
                 "{f:?} drain: {r:?}"
             );
+        }
+    }
+
+    fn huge_sparse(name: &str) -> Vec<u8> {
+        let mut h = ::tar::Header::new_gnu();
+        h.set_path(name).unwrap();
+        h.set_mode(0o644);
+        h.set_entry_type(::tar::EntryType::GNUSparse);
+        h.set_size(0);
+        {
+            let g = h.as_gnu_mut().unwrap();
+            // base-256 number: 2^63 - 1
+            let mut v = [0xFFu8; 12];
+            v[0] = 0x80;
+            v[1] = 0;
+            v[2] = 0;
+            v[3] = 0;
+            v[4] = 0x7F;
+            g.realsize.copy_from_slice(&v);
+        }
+        h.set_cksum();
+        h.as_bytes().to_vec()
+    }
+
+    struct Totals(Vec<u64>);
+    impl JobCtl for Totals {
+        fn progress(&mut self, _: &str, _: u64, total: u64) {
+            self.0.push(total);
+        }
+        fn cancelled(&self) -> bool {
+            false
+        }
+        fn resolve_conflict(&mut self, _: &Path) -> crate::engine::ConflictChoice {
+            crate::engine::ConflictChoice::Overwrite
+        }
+    }
+
+    #[test]
+    fn untrusted_sparse_sizes_do_not_overflow_totals() {
+        let t = tar_of(
+            &[
+                huge_sparse("s1"),
+                huge_sparse("s2"),
+                file("a.txt", b"12345"),
+            ],
+            2,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.tar", &t);
+        let mut e = TarLikeEngine::new(&a, Format::Tar);
+        let es = e.list(None).unwrap().1;
+        assert_eq!(es.len(), 3);
+        let mut tot = Totals(vec![]);
+        let rep = e
+            .extract(None, &req(&dir.path().join("o")), &mut tot)
+            .unwrap();
+        assert_eq!(rep.ok, 1);
+        assert_eq!(rep.failed.len(), 2);
+        // the progress total counts only what is extracted
+        assert_eq!(tot.0, [5]);
+        let rep = TarLikeEngine::new(&a, Format::Tar)
+            .test(None, &mut ctl())
+            .unwrap();
+        assert!(rep.failed.is_empty());
+    }
+
+    #[test]
+    fn pax_size_empty_is_unset_and_nul_padding_is_tolerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let recs = format!("{}{}", pax_record("size", ""), pax_record("path", "p.txt"));
+        let t = tar_of(&[pax(&recs), file("short", b"data!")], 2);
+        let a = write(dir.path(), "a.tar", &t);
+        let es = TarLikeEngine::new(&a, Format::Tar).list(None).unwrap().1;
+        assert_eq!((es[0].path.as_str(), es[0].size), ("p.txt", 5));
+        let out = dir.path().join("o");
+        let rep = TarLikeEngine::new(&a, Format::Tar)
+            .extract(None, &req(&out), &mut ctl())
+            .unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+        assert_eq!(fs::read(out.join("p.txt")).unwrap(), b"data!");
+        // NUL padding inside the record block
+        let mut data = pax_record("path", "n.txt").into_bytes();
+        data.extend([0u8; 40]);
+        let mut x = header_bytes(b'x', "PaxHeaders/x", data.len() as u64);
+        x.extend(padded(data));
+        let t = tar_of(&[x, file("short", b"nn")], 2);
+        let a = write(dir.path(), "b.tar", &t);
+        let es = TarLikeEngine::new(&a, Format::Tar).list(None).unwrap().1;
+        assert_eq!(es[0].path, "n.txt");
+        // other malformed records stay corrupt
+        for bad in ["size=abc\n", "5 pa\n", "99 path=x\n"] {
+            let mut data = format!("{} ", bad.len() + 3).into_bytes();
+            data.extend(bad.as_bytes());
+            if bad.starts_with('5') || bad.starts_with('9') {
+                data = bad.as_bytes().to_vec();
+            }
+            let mut x = header_bytes(b'x', "PaxHeaders/x", data.len() as u64);
+            x.extend(padded(data));
+            let t = tar_of(&[x, file("short", b"nn")], 2);
+            let a = write(dir.path(), "c.tar", &t);
+            let l = TarLikeEngine::new(&a, Format::Tar).list(None);
+            assert!(matches!(l, Err(ArchiveError::Corrupt(_))), "{bad}: {l:?}");
         }
     }
 
