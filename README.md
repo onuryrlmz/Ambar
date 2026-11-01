@@ -81,7 +81,7 @@ Bugüne dek yalnızca **Mac (Apple Silicon)** üzerinde çalıştırıldı. **Wi
 
 ## Derleme
 
-Hazır paket henüz yok, Ambar kaynak koddan derlenir. Testler her push ve pull request'te Mac, Ubuntu ve Windows'ta çalışır (`.github/workflows/test.yml`), ama paket ya da sürüm üretilmez.
+Hazır paket henüz yok, Ambar kaynak koddan derlenir. Testler `main` dalına her push'ta ve her pull request'te Mac, Ubuntu ve Windows'ta çalışır (`.github/workflows/test.yml`), ama paket ya da sürüm üretilmez.
 
 Gerekenler: Rust, Node.js ve [Tauri 2 önkoşulları](https://tauri.app/start/prerequisites/). UnRAR kütüphanesi C++ olduğu için bir C++ derleyicisi de gerekir.
 
