@@ -180,6 +180,29 @@ fn free_name(target: &Path) -> PathBuf {
     }
 }
 
+/// True when `dest`, which exists, is one of the run's source files. Compared by file as
+/// well as by path, since a case-insensitive disk reaches `2.zip` as `2.ZIP`.
+fn is_protected(dest: &Path, req: &ExtractRequest) -> bool {
+    if req.protected.is_empty() {
+        return false;
+    }
+    if std::fs::canonicalize(dest).is_ok_and(|c| req.protected.contains(&c)) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(d) = std::fs::metadata(dest) {
+            return req
+                .protected
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .any(|p| p.dev() == d.dev() && p.ino() == d.ino());
+        }
+    }
+    false
+}
+
 pub fn plan_entry(
     entry: &Entry,
     req: &ExtractRequest,
@@ -207,7 +230,7 @@ pub fn plan_entry(
             Err(ArchiveError::DestConflict(rel))
         };
     }
-    if meta.is_dir() {
+    if meta.is_dir() || is_protected(&dest, req) {
         return Err(ArchiveError::DestConflict(rel));
     }
     let choice = match req.overwrite {
@@ -439,6 +462,7 @@ mod tests {
             keep_paths: true,
             overwrite: policy,
             keep_broken: false,
+            protected: vec![],
         }
     }
 
@@ -638,6 +662,25 @@ mod tests {
             Err(ArchiveError::DestConflict(_))
         ));
         assert!(d.path().join("a").is_dir());
+    }
+
+    #[test]
+    fn a_protected_source_fails_under_every_policy() {
+        for policy in [OverwritePolicy::Ask, OverwritePolicy::Overwrite, OverwritePolicy::Skip, OverwritePolicy::Rename] {
+            let d = tempfile::tempdir().unwrap();
+            let source = d.path().join("2.zip");
+            fs::write(&source, "arsiv").unwrap();
+            let mut r = req(d.path(), policy);
+            r.protected = vec![fs::canonicalize(&source).unwrap()];
+            let mut c = ctl(ConflictChoice::Overwrite);
+            assert!(
+                matches!(plan_entry(&file("2.zip"), &r, &mut c), Err(ArchiveError::DestConflict(_))),
+                "{policy:?}"
+            );
+            assert_eq!(fs::read_to_string(&source).unwrap(), "arsiv");
+            // Another file is not protected.
+            assert!(plan_entry(&file("3.zip"), &r, &mut c).is_ok());
+        }
     }
 
     #[test]

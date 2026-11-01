@@ -18,6 +18,8 @@ export interface BatchRow {
   dismissed?: boolean;
   /** Stands for this many failures of the archive that are not listed. */
   more?: number;
+  /** A later volume of a set: handled with this first volume, and not a problem. */
+  volumeOf?: string;
 }
 
 export interface BatchSummary {
@@ -26,6 +28,8 @@ export interface BatchSummary {
   okArchives: number;
   failedArchives: number;
   dismissedArchives: number;
+  /** Later volumes of a set, handled with its first. */
+  joinedParts: number;
   /** Cancelled under way, or never started. */
   notFinished: number;
   ok: number;
@@ -42,6 +46,11 @@ export interface BatchDeps extends Pick<JobDeps, "newId" | "watch" | "cancel" | 
   needsPassword: (path: string) => Promise<boolean>;
   /** Resolves to null when closed. */
   askPassword: (name: string, wrong: boolean) => Promise<string | null>;
+  /**
+   * What identifies this archive's run, or null if still unknown. Some sets can only be told
+   * apart once the password opens their headers, so the plan cannot have joined them yet.
+   */
+  runKey?: (path: string, password: string | null) => Promise<string | null>;
   /** `index` counts from 1. */
   onArchive?: (index: number, total: number, name: string) => void;
   onControl?: (control: { cancel: () => void }) => void;
@@ -50,10 +59,17 @@ export interface BatchDeps extends Pick<JobDeps, "newId" | "watch" | "cancel" | 
 const passwordTrouble = (s: JobSummary): boolean =>
   !!s.dismissed || (s.error !== null && isPasswordCode(s.error.code)) || s.failures.some((f) => isPasswordCode(f.error.code));
 
-/** Runs the archives in the given order. A failure is that archive's alone; İptal ends the run. */
-export async function runBatch(paths: string[], deps: BatchDeps): Promise<BatchSummary> {
+/**
+ * Runs the archives in the given order. A failure is that archive's alone; İptal ends the
+ * run. `joined` is what the plan already folded into a first volume, reported here.
+ */
+export async function runBatch(
+  paths: string[],
+  deps: BatchDeps,
+  joined: { part: string; first: string }[] = [],
+): Promise<BatchSummary> {
   const out: BatchSummary = {
-    kind: "ok", total: paths.length, okArchives: 0, failedArchives: 0, dismissedArchives: 0,
+    kind: "ok", total: paths.length, okArchives: 0, failedArchives: 0, dismissedArchives: 0, joinedParts: 0,
     notFinished: 0, ok: 0, skipped: 0, failed: 0, rows: [], mayHaveWritten: false,
   };
   let cancelled = false;
@@ -65,8 +81,10 @@ export async function runBatch(paths: string[], deps: BatchDeps): Promise<BatchS
     },
   });
   const applyAll: { choice: ConflictChoice | null } = { choice: null };
-  // What the user last typed and no archive has turned down: parts of one set share it.
+  // The last password that really opened something: parts of one set share it.
   let remembered: string | null = null;
+  const firstOfRun = new Map<string, string>();
+  let joinedLate = 0;
 
   for (const [i, path] of paths.entries()) {
     if (cancelled) break;
@@ -84,6 +102,20 @@ export async function runBatch(paths: string[], deps: BatchDeps): Promise<BatchS
         continue;
       }
     }
+    const key = deps.runKey ? await deps.runKey(path, first).catch(() => null) : null;
+    if (cancelled) break;
+    if (key !== null) {
+      const owner = firstOfRun.get(key);
+      if (owner !== undefined) {
+        joinedLate++;
+        out.joinedParts++;
+        out.rows.push({ archive: name, path: null, error: null, volumeOf: owner });
+        continue;
+      }
+      firstOfRun.set(key, name);
+    }
+    // A password carried over from another archive was not typed wrong for this one.
+    let carried = first !== null && typed === null;
     const summary = await runJob({
       newId: deps.newId,
       watch: deps.watch,
@@ -95,7 +127,8 @@ export async function runBatch(paths: string[], deps: BatchDeps): Promise<BatchS
       initialPassword: first,
       applyAll,
       askPassword: async (wrong) => {
-        const given = await deps.askPassword(name, wrong);
+        const given = await deps.askPassword(name, carried ? false : wrong);
+        carried = false;
         if (given !== null) typed = given;
         return given;
       },
@@ -105,7 +138,7 @@ export async function runBatch(paths: string[], deps: BatchDeps): Promise<BatchS
     });
     cancelCurrent = null;
     if (passwordTrouble(summary)) remembered = null;
-    else if (typed !== null) remembered = typed;
+    else if (typed !== null && summary.decrypted > 0) remembered = typed;
 
     if (summary.dismissed) {
       out.dismissedArchives++;
@@ -137,7 +170,11 @@ export async function runBatch(paths: string[], deps: BatchDeps): Promise<BatchS
     }
   }
 
-  out.notFinished = out.total - out.okArchives - out.failedArchives - out.dismissedArchives;
+  for (const j of joined) {
+    out.joinedParts++;
+    out.rows.push({ archive: baseName(j.part), path: null, error: null, volumeOf: baseName(j.first) });
+  }
+  out.notFinished = out.total - out.okArchives - out.failedArchives - out.dismissedArchives - joinedLate;
   if (cancelled) out.kind = "cancelled";
   else if (out.failedArchives === 0 && out.dismissedArchives === 0) out.kind = "ok";
   else out.kind = out.ok > 0 || out.skipped > 0 || out.okArchives > 0 ? "partial" : "failed";

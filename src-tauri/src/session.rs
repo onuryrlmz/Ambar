@@ -1,6 +1,6 @@
 //! Per-run state: confirmed passwords (memory only) and temp folders for opened entries.
 
-use crate::engine::plan::{normalize_entry_path, output_rel, safe_dest, Selection};
+use crate::engine::plan::{normalize_entry_path, output_rel, safe_dest};
 use crate::engine::{
     ArchiveEngine, ArchiveInfo, ConflictChoice, Entry, ExtractRequest, JobCtl, OpReport,
     OverwritePolicy, Password,
@@ -136,22 +136,14 @@ impl JobCtl for QuietCtl {
     }
 }
 
-/// True when a run proves `pw` right: no wrong-password failure, and at least one
-/// selected encrypted entry went through without failing.
-pub fn confirms_password(entries: &[Entry], selection: &[String], report: &OpReport) -> bool {
-    if report.ok == 0
-        || report
+/// True when a run proves its password right: an encrypted file really was opened with
+/// it, and none was turned down. Skipped files and folders prove nothing.
+pub fn confirms_password(report: &OpReport) -> bool {
+    report.decrypted > 0
+        && !report
             .failed
             .iter()
             .any(|f| matches!(f.error, ArchiveError::WrongPassword | ArchiveError::PasswordRequired))
-    {
-        return false;
-    }
-    let selection = Selection::new(selection);
-    entries
-        .iter()
-        .filter(|e| !e.is_dir && e.encrypted && selection.has(&e.path))
-        .any(|e| !report.failed.iter().any(|f| f.path == e.path))
 }
 
 /// Wraps an engine so a password given by the user is cached once a run proves it
@@ -181,10 +173,9 @@ impl ConfirmEngine {
         Ok(self.listed.as_ref().unwrap())
     }
 
-    fn confirm(&mut self, pw: Option<&Password>, selection: &[String], r: &OpReport) {
-        let Some(given) = self.given.clone() else { return };
-        if let Ok((_, entries)) = self.listing(pw) {
-            if confirms_password(entries, selection, r) {
+    fn confirm(&mut self, r: &OpReport) {
+        if let Some(given) = self.given.clone() {
+            if confirms_password(r) {
                 self.session.remember_password(&self.archive, given);
             }
         }
@@ -203,13 +194,13 @@ impl ArchiveEngine for ConfirmEngine {
         ctl: &mut dyn JobCtl,
     ) -> Result<OpReport, ArchiveError> {
         let r = self.inner.extract(pw, req, ctl)?;
-        self.confirm(pw, &req.selection, &r);
+        self.confirm(&r);
         Ok(r)
     }
 
     fn test(&mut self, pw: Option<&Password>, ctl: &mut dyn JobCtl) -> Result<OpReport, ArchiveError> {
         let r = self.inner.test(pw, ctl)?;
-        self.confirm(pw, &[], &r);
+        self.confirm(&r);
         Ok(r)
     }
 }
@@ -236,6 +227,7 @@ pub fn extract_entry_to_temp(
         keep_paths: false,
         overwrite: OverwritePolicy::Overwrite,
         keep_broken: false,
+        protected: vec![],
     };
     let report = engine.extract(pw, &req, &mut QuietCtl)?;
     if let Some(f) = report.failed.into_iter().next() {
@@ -433,6 +425,7 @@ mod tests {
                 keep_paths: true,
                 overwrite: OverwritePolicy::Overwrite,
                 keep_broken: false,
+                protected: vec![],
             }),
         )
         .unwrap();
@@ -458,6 +451,38 @@ mod tests {
         let r = run_job(&s, &z, Some("herhangi"), &["plain.txt"]);
         assert_eq!(r["report"]["ok"], 1);
         assert!(s.resolve_password(&z, None).is_none());
+    }
+
+    #[test]
+    fn a_wrong_password_on_a_rerun_that_skips_everything_is_not_cached() {
+        let d = tempfile::tempdir().unwrap();
+        let z = d.path().join("a.zip");
+        aes_zip(&z, "gizli.txt", "doğru");
+        let out = d.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let req = ExtractRequest {
+            dest: out,
+            selection: vec![],
+            base: String::new(),
+            keep_paths: true,
+            overwrite: OverwritePolicy::Skip,
+            keep_broken: false,
+            protected: vec![],
+        };
+        let s = Session::new(d.path().join(TEMP_DIR_NAME));
+        let run = |given: &str| {
+            let given = wrap_password(Some(given.into()));
+            let mut e = ConfirmEngine::new(crate::engine::open_engine(&z).unwrap(), s.clone(), z.clone(), given.clone());
+            e.extract(given.as_ref(), &req, &mut QuietCtl).unwrap()
+        };
+        let first = run("doğru");
+        assert_eq!(first.decrypted, 1);
+        let s2 = Session::new(d.path().join(TEMP_DIR_NAME));
+        let given = wrap_password(Some("YANLIS".into()));
+        let mut e = ConfirmEngine::new(crate::engine::open_engine(&z).unwrap(), s2.clone(), z.clone(), given.clone());
+        let rep = e.extract(given.as_ref(), &req, &mut QuietCtl).unwrap();
+        assert_eq!((rep.decrypted, rep.skipped), (0, 2));
+        assert!(s2.resolve_password(&z, None).is_none(), "skipping proves nothing");
     }
 
     #[test]

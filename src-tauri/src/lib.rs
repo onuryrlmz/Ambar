@@ -48,6 +48,7 @@ pub fn run() {
             commands::start_extract,
             commands::start_test,
             commands::plan_batch,
+            commands::run_key,
             commands::archive_needs_password,
             commands::cancel_job,
             commands::answer_conflict,

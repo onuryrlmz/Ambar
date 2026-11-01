@@ -312,7 +312,209 @@ fn a_rar_set_given_as_all_its_parts_runs_once() {
     assert_eq!(code(&o), 0, "{}", out(&o));
     assert!(e.dest().join("buyuk.bin").exists());
     assert!(!e.dest().join("buyuk (1).bin").exists());
-    assert_eq!(out(&o).matches("multi.part").count(), 1, "{}", out(&o));
+    assert!(out(&o).contains("multi.part2.rar: volume of multi.part1.rar"), "{}", out(&o));
+    assert!(last_line(&o).contains("1 joined"), "{}", last_line(&o));
+}
+
+fn fx(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+}
+
+#[test]
+fn rar_archives_with_numbered_names_all_run() {
+    let e = Env::new();
+    let (a, b) = (e.p("yedek.1.rar"), e.p("yedek.2.rar"));
+    fs::copy(fx("plain5.rar"), &a).unwrap();
+    fs::copy(fx("stored.rar"), &b).unwrap();
+    let o = extract(&[&a, &b], &e.dest(), &["--separate"]);
+    assert_eq!(code(&o), 0, "{}", out(&o));
+    assert!(e.dest().join("yedek.1/kok.txt").exists());
+    assert!(e.dest().join("yedek.2/buyuk.bin").exists(), "{}", out(&o));
+    assert!(last_line(&o).starts_with("Total: 2 archives"), "{}", last_line(&o));
+}
+
+#[test]
+fn a_rar_with_a_number_before_the_extension_opens_and_tests_as_itself() {
+    let e = Env::new();
+    let r = e.p("rapor.2024.rar");
+    fs::copy(fx("plain5.rar"), &r).unwrap();
+    let o = extract(&[&r], &e.dest(), &[]);
+    assert_eq!(code(&o), 0, "{}", out(&o));
+    let (p1, p2) = (e.p("a.part1.rar"), e.p("a.part2.rar"));
+    fs::copy(fx("stored.rar"), &p1).unwrap();
+    fs::write(&p2, fs::read(fx("corrupt.rar")).unwrap()).unwrap();
+    let o = ambar(&["test".as_ref(), p2.as_os_str()]);
+    assert_eq!(code(&o), 1, "the damaged part2 itself is what gets tested: {}", out(&o));
+}
+
+#[test]
+fn an_old_style_set_extracts_once_and_clean() {
+    let e = Env::new();
+    let (rar, r0, r1) = (fx("old.rar"), fx("old.r00"), fx("old.r01"));
+    let o = extract(&[&r1, &r0, &rar], &e.dest(), &["--overwrite", "rename"]);
+    assert_eq!(code(&o), 0, "{}", out(&o));
+    assert!(out(&o).contains("old.r00: volume of old.rar"), "{}", out(&o));
+    assert!(out(&o).contains("old.r01: volume of old.rar"), "{}", out(&o));
+    assert_eq!(fs::read(e.dest().join("buyuk.bin")).unwrap(), fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/buyuk.bin")).unwrap());
+    assert!(!e.dest().join("buyuk (1).bin").exists());
+}
+
+#[test]
+fn encrypted_header_volumes_collapse_with_the_password() {
+    let e = Env::new();
+    let (p1, p2) = (fx("envol.part1.rar"), fx("envol.part2.rar"));
+    let d = e.dest();
+    let o = with_stdin(
+        &["extract".as_ref(), p2.as_os_str(), p1.as_os_str(), "--dest".as_ref(), d.as_os_str(), "--overwrite".as_ref(), "rename".as_ref(), "--password-stdin".as_ref()],
+        b"Test123\n",
+    );
+    assert_eq!(code(&o), 0, "{}", out(&o));
+    assert!(out(&o).contains("envol.part2.rar: volume of envol.part1.rar"), "{}", out(&o));
+    assert!(!e.dest().join("buyuk (1).bin").exists());
+}
+
+#[test]
+fn a_rerun_writes_nothing_and_says_ok_0_even_with_folder_entries() {
+    let e = Env::new();
+    let z = e.p("d.zip");
+    {
+        let mut w = zip::ZipWriter::new(fs::File::create(&z).unwrap());
+        let o = SimpleFileOptions::default();
+        w.add_directory("alt/", o).unwrap();
+        w.add_directory("alt/ic/", o).unwrap();
+        w.start_file("alt/ic/a.txt", o).unwrap();
+        w.write_all(b"a").unwrap();
+        w.finish().unwrap();
+    }
+    let o = extract(&[&z], &e.dest(), &[]);
+    assert!(out(&o).contains("d.zip: ok 1, skipped 0, failed 0"), "{}", out(&o));
+    let o = extract(&[&z], &e.dest(), &[]);
+    assert!(out(&o).contains("d.zip: ok 0, skipped 1, failed 0"), "{}", out(&o));
+    let (rar, d2) = (fx("plain5.rar"), e.p("r"));
+    assert_eq!(code(&extract(&[&rar], &d2, &[])), 0);
+    let o = extract(&[&rar], &d2, &[]);
+    assert!(out(&o).contains("plain5.rar: ok 0, skipped 4, failed 0"), "{}", out(&o));
+}
+
+#[test]
+fn same_stems_get_separate_folders_in_plan_order() {
+    let e = Env::new();
+    fs::create_dir(e.p("2023")).unwrap();
+    fs::create_dir(e.p("2024")).unwrap();
+    let a = e.zip("2023/foto.zip", &[("x.txt", b"yirmi uc")]);
+    let b = e.zip("2024/foto.zip", &[("x.txt", b"yirmi dort")]);
+    let o = extract(&[&a, &b], &e.dest(), &["--separate"]);
+    assert_eq!(code(&o), 0, "{}", out(&o));
+    assert_eq!(fs::read(e.dest().join("foto/x.txt")).unwrap(), b"yirmi uc");
+    assert_eq!(fs::read(e.dest().join("foto (1)/x.txt")).unwrap(), b"yirmi dort");
+}
+
+#[test]
+fn an_entry_never_replaces_a_source_archive_under_any_policy() {
+    for policy in ["skip", "overwrite", "rename"] {
+        let e = Env::new();
+        let two = e.zip("2.zip", &[("iki.txt", b"iki")]);
+        let before = fs::read(&two).unwrap();
+        let one = e.zip("1.zip", &[("2.zip", b"sahte"), ("1.zip", b"sahte"), ("bir.txt", b"bir")]);
+        let own = fs::read(&one).unwrap();
+        let o = extract(&[&one, &two], e.dir.path(), &["--overwrite", policy]);
+        assert_eq!(code(&o), 1, "{policy}: {}", out(&o));
+        assert_eq!(fs::read(&two).unwrap(), before, "{policy}");
+        assert_eq!(fs::read(&one).unwrap(), own, "{policy}");
+        assert!(out(&o).contains("failed: 2.zip [dest_conflict]"), "{policy}: {}", out(&o));
+        assert!(out(&o).contains("failed: 1.zip [dest_conflict]"), "{policy}: {}", out(&o));
+        assert!(e.p("bir.txt").exists() && e.p("iki.txt").exists());
+    }
+}
+
+#[test]
+fn a_dotted_name_loses_its_dots_and_an_empty_one_fails_alone() {
+    let e = Env::new();
+    let a = e.zip(".ssh.zip", &[("k", b"k")]);
+    let b = e.zip("...zip", &[("k", b"k")]);
+    let c = e.zip("c.zip", &[("k", b"k")]);
+    let o = extract(&[&a, &b, &c], &e.dest(), &["--separate"]);
+    assert_eq!(code(&o), 1, "{}", out(&o));
+    assert!(e.dest().join("ssh/k").exists());
+    assert!(e.dest().join("c/k").exists());
+    assert!(out(&o).contains("[unsafe_path]"), "{}", out(&o));
+}
+
+#[test]
+fn a_failed_archive_leaves_no_empty_folders_in_its_own_folder() {
+    let e = Env::new();
+    let data: &[u8] = b"bu dosyanin verisi birazdan bozulacak";
+    let z = e.zip("k.zip", &[("alt/ic/bozuk.txt", data)]);
+    damage_data(&z, data);
+    fs::create_dir(e.dest()).unwrap();
+    let o = extract(&[&z], &e.dest(), &["--separate"]);
+    assert_eq!(code(&o), 1);
+    assert_eq!(fs::read_dir(e.dest()).unwrap().count(), 0, "{}", out(&o));
+}
+
+#[test]
+fn a_mixed_rar_with_a_wrong_password_counts_what_got_out() {
+    let e = Env::new();
+    let (m, d) = (fx("mixed.rar"), e.dest());
+    let o = with_stdin(&["extract".as_ref(), m.as_os_str(), "--dest".as_ref(), d.as_os_str(), "--password-stdin".as_ref()], b"YANLIS\n");
+    assert_eq!(code(&o), 1);
+    assert!(out(&o).contains("mixed.rar: ok 1, skipped 0, failed 1"), "{}", out(&o));
+    assert!(out(&o).contains("[wrong_password]"), "{}", out(&o));
+    assert!(d.join("acik.txt").exists());
+}
+
+#[test]
+fn a_dest_made_for_nothing_does_not_stay() {
+    let e = Env::new();
+    let text = e.p("notlar.txt");
+    fs::write(&text, "merhaba").unwrap();
+    let dest = e.p("yeni/alt/data");
+    let o = extract(&[&text], &dest, &[]);
+    assert_eq!(code(&o), 1);
+    assert!(!e.p("yeni").exists(), "{}", out(&o));
+    // One that was already there stays, empty or not.
+    fs::create_dir(e.dest()).unwrap();
+    let o = extract(&[&text], &e.dest(), &[]);
+    assert_eq!(code(&o), 1);
+    assert!(e.dest().is_dir());
+    // Damaged output pruned in a dest of our own too.
+    let data: &[u8] = b"bu dosyanin verisi birazdan bozulacak";
+    let z = e.zip("k.zip", &[("alt/bozuk.txt", data)]);
+    damage_data(&z, data);
+    let fresh = e.p("taze");
+    assert_eq!(code(&extract(&[&z], &fresh, &[])), 1);
+    assert!(!fresh.exists());
+}
+
+#[test]
+fn own_options_first_are_a_usage_error_not_a_window() {
+    for flag in ["--password-stdin", "--dest", "--overwrite", "--separate", "--no-paths", "--keep-broken"] {
+        let o = Command::new(BIN).arg(flag).stdin(Stdio::null()).output().unwrap();
+        assert_eq!(code(&o), 2, "{flag}");
+    }
+}
+
+#[test]
+fn an_option_value_starting_with_a_dash_is_refused() {
+    let e = Env::new();
+    let a = e.zip("a.zip", &[("a.txt", b"a")]);
+    let o = Command::new(BIN).current_dir(e.dir.path()).args(["extract", "a.zip", "--dest", "--separate"]).output().unwrap();
+    assert_eq!(code(&o), 2);
+    assert!(!e.p("--separate").exists());
+    let o = Command::new(BIN).current_dir(e.dir.path()).args(["extract", "a.zip", "--dest=-veri"]).output().unwrap();
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert!(a.exists() && e.p("-veri/a.txt").exists());
+}
+
+#[test]
+fn help_to_a_closed_pipe_exits_quietly() {
+    for flag in ["--help", "--version"] {
+        let mut c = Command::new(BIN).arg(flag).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        drop(c.stdout.take());
+        let o = c.wait_with_output().unwrap();
+        assert_eq!(code(&o), 0, "{flag}: {}", err(&o));
+        assert_eq!(err(&o), "", "{flag}");
+    }
 }
 
 #[test]

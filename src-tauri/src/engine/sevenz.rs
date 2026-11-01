@@ -8,6 +8,7 @@ use super::plan::{
     PlanOutcome,
 };
 use super::{
+    stopped_by,
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
     Password,
 };
@@ -189,57 +190,63 @@ impl SevenZEngine {
             return Err(ArchiveError::PasswordRequired);
         }
 
-        for b in 0..archive.blocks.len() {
-            let start = archive.stream_map.block_first_file_index[b];
-            let dec = BlockDecoder::new(1, b, &archive, &spw, &mut file);
-            // Nothing wanted in this block: do not decode it.
-            if req.is_some() && !(start..start + dec.entry_count()).any(|i| run.is_work(i)) {
-                continue;
+        let outcome = (|| -> Result<(), ArchiveError> {
+            for b in 0..archive.blocks.len() {
+                let start = archive.stream_map.block_first_file_index[b];
+                let dec = BlockDecoder::new(1, b, &archive, &spw, &mut file);
+                // Nothing wanted in this block: do not decode it.
+                if req.is_some() && !(start..start + dec.entry_count()).any(|i| run.is_work(i)) {
+                    continue;
+                }
+                let failed_before = run.report.failed.len();
+                run.block_damaged = false;
+                let mut cur = start;
+                let mut fatal = None;
+                let res = dec.for_each_entries(&mut |_, data| {
+                    let i = cur;
+                    cur += 1;
+                    match run.handle(i, data) {
+                        Ok(()) => Ok(true),
+                        Err(e) => {
+                            fatal = Some(e);
+                            Ok(false)
+                        }
+                    }
+                });
+                if let Some(e) = fatal {
+                    return Err(e);
+                }
+                if let Err(e) = res {
+                    // The rest of this block cannot be read. Say so unless an entry of it
+                    // already carries the failure.
+                    let encrypted = Self::block_encrypted(&archive, Some(b));
+                    let err = match map_err(e) {
+                        ArchiveError::PasswordRequired => return Err(ArchiveError::PasswordRequired),
+                        ArchiveError::WrongPassword | ArchiveError::Corrupt(_) if encrypted => {
+                            return Err(ArchiveError::WrongPassword)
+                        }
+                        ArchiveError::WrongPassword => ArchiveError::Corrupt("read error".into()),
+                        other => other,
+                    };
+                    if run.report.failed.len() == failed_before {
+                        let path = metas.get(cur).unwrap_or(&metas[start]).entry.path.clone();
+                        run.fail(&path, err);
+                    }
+                }
             }
-            let failed_before = run.report.failed.len();
+            // Entries without data (empty files, folders) are not part of any block.
             run.block_damaged = false;
-            let mut cur = start;
-            let mut fatal = None;
-            let res = dec.for_each_entries(&mut |_, data| {
-                let i = cur;
-                cur += 1;
-                match run.handle(i, data) {
-                    Ok(()) => Ok(true),
-                    Err(e) => {
-                        fatal = Some(e);
-                        Ok(false)
-                    }
-                }
-            });
-            if let Some(e) = fatal {
-                return Err(e);
-            }
-            if let Err(e) = res {
-                // The rest of this block cannot be read. Say so unless an entry of it
-                // already carries the failure.
-                let encrypted = Self::block_encrypted(&archive, Some(b));
-                let err = match map_err(e) {
-                    ArchiveError::PasswordRequired => return Err(ArchiveError::PasswordRequired),
-                    ArchiveError::WrongPassword | ArchiveError::Corrupt(_) if encrypted => {
-                        return Err(ArchiveError::WrongPassword)
-                    }
-                    ArchiveError::WrongPassword => ArchiveError::Corrupt("read error".into()),
-                    other => other,
-                };
-                if run.report.failed.len() == failed_before {
-                    let path = metas.get(cur).unwrap_or(&metas[start]).entry.path.clone();
-                    run.fail(&path, err);
+            for i in 0..metas.len() {
+                if archive.stream_map.file_block_index[i].is_none() {
+                    run.handle(i, &mut std::io::empty())?;
                 }
             }
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => Ok(run.report),
+            Err(e) => stopped_by(run.report, &self.path, e),
         }
-        // Entries without data (empty files, folders) are not part of any block.
-        run.block_damaged = false;
-        for i in 0..metas.len() {
-            if archive.stream_map.file_block_index[i].is_none() {
-                run.handle(i, &mut std::io::empty())?;
-            }
-        }
-        Ok(run.report)
     }
 }
 
@@ -359,7 +366,6 @@ impl Run<'_> {
                     }
                     PlanOutcome::Write(dest) if entry.is_dir => {
                         std::fs::create_dir_all(&dest)?;
-                        self.report.ok += 1;
                         return Ok(());
                     }
                     // Garbage from a wrong key is not worth keeping.
@@ -381,6 +387,9 @@ impl Run<'_> {
         match result {
             Ok(()) => {
                 self.report.ok += 1;
+                if entry.encrypted && entry.size > 0 {
+                    self.report.decrypted += 1;
+                }
                 self.done = self.done.saturating_add(entry.size);
                 Ok(())
             }
@@ -462,6 +471,7 @@ mod tests {
             keep_paths: true,
             overwrite: OverwritePolicy::Overwrite,
             keep_broken: false,
+            protected: vec![],
         }
     }
 

@@ -289,7 +289,7 @@ pub mod test_support {
             match self.0 {
                 Mode::Ok => {
                     ctl.progress("a", 1, 3);
-                    Ok(OpReport { ok: 3, skipped: 0, failed: vec![] })
+                    Ok(OpReport { ok: 3, skipped: 0, failed: vec![], decrypted: 0 })
                 }
                 Mode::WaitCancel => loop {
                     if ctl.cancelled() {
@@ -300,9 +300,9 @@ pub mod test_support {
                 Mode::Conflict => match ctl.resolve_conflict(Path::new("/x/y")) {
                     ConflictChoice::Cancel => Err(ArchiveError::Cancelled),
                     ConflictChoice::Skip => {
-                        Ok(OpReport { ok: 0, skipped: 1, failed: vec![] })
+                        Ok(OpReport { ok: 0, skipped: 1, failed: vec![], decrypted: 0 })
                     }
-                    _ => Ok(OpReport { ok: 1, skipped: 0, failed: vec![] }),
+                    _ => Ok(OpReport { ok: 1, skipped: 0, failed: vec![], decrypted: 0 }),
                 },
                 Mode::Failed => Ok(OpReport {
                     ok: 1,
@@ -311,6 +311,7 @@ pub mod test_support {
                         path: "bad.txt".into(),
                         error: ArchiveError::Corrupt("crc".into()),
                     }],
+                    decrypted: 0,
                 }),
                 Mode::DiskFull => {
                     Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into())

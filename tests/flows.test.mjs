@@ -197,6 +197,11 @@ test("runJob: a password failure inside a report prompts too", async () => {
   assert.deepEqual(log.passwords, [null, "Test123"]);
 });
 
+test("summaries carry what was really decrypted", () => {
+  assert.equal(summarizeReport({ ok: 2, skipped: 1, failed: [], decrypted: 2 }).decrypted, 2);
+  assert.equal(summarizeDone({ report: null, error: err("corrupt") }).decrypted, 0);
+});
+
 test("runJob: cancelling the prompt after a partial run reports that run, not cancelled", async () => {
   const mixed = (h, id) =>
     h.onDone({ id, report: { ok: 2, skipped: 0, failed: [{ path: "a", error: err("password_required") }] }, error: null });

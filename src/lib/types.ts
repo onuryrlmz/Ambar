@@ -53,6 +53,8 @@ export interface ExtractRequest {
   keepPaths: boolean;
   overwrite: OverwritePolicy;
   keepBroken: boolean;
+  /** Canonical paths from `planBatch` that no entry may write over. */
+  protected?: string[];
 }
 
 export interface FileFailure {
@@ -64,6 +66,17 @@ export interface OpReport {
   ok: number;
   skipped: number;
   failed: FileFailure[];
+  /** Files with content a password really opened. Only this proves a password. */
+  decrypted: number;
+}
+
+/** Mirrors `batch::BatchPlan`. */
+export interface BatchPlan {
+  /** In run order. `folder` is null when the name allows no folder: that run then fails. */
+  archives: { path: string; folder: string | null }[];
+  /** Later volumes of a set: no run of their own, still reported. */
+  joined: { part: string; first: string }[];
+  protected: string[];
 }
 
 export interface ProgressEvent {

@@ -41,7 +41,7 @@ KEY=000102030405060708090a0b0c0d0e0f
 openssl enc -aes-128-ctr -K "$KEY" -iv 00000000000000000000000000000000 \
   < <(head -c 20480 /dev/zero) > "$ROOT/src-tauri/tests/buyuk.bin"
 
-rm -f "$OUT"/*.rar
+rm -f "$OUT"/*.rar "$OUT"/*.r[0-9][0-9]
 cd "$SRC"
 Q="-idq -y"
 
@@ -59,7 +59,17 @@ printf 'yorum' > "$WORK/comment.txt"
 # multi-volume: 20 KB random file plus kok.txt; -v12k gives exactly two volumes (-v5k gives five)
 cp "$ROOT/src-tauri/tests/buyuk.bin" "$SRC/buyuk.bin"
 "$RAR" a $Q -ma5 -v12k "$OUT/multi.rar" buyuk.bin kok.txt
+# old-style names (old.rar, old.r00, ...), and a set whose headers are encrypted
+"$RAR4" a $Q -ma4 -m0 -v8k -vn "$OUT/old.rar" buyuk.bin kok.txt
+"$RAR" a $Q -ma5 -v12k "-hp$PW" "$OUT/envol.rar" buyuk.bin kok.txt
 rm "$SRC/buyuk.bin"
+
+# plain entry first, then an encrypted one: a wrong password stops the run half way
+printf 'acik\n' > "$SRC/acik.txt"
+printf 'gizli\n' > "$SRC/gizli.txt"
+"$RAR" a $Q -ma5 "$OUT/mixed.rar" acik.txt
+"$RAR" a $Q -ma5 "-p$PW" "$OUT/mixed.rar" gizli.txt
+rm "$SRC/acik.txt" "$SRC/gizli.txt"
 
 # stored (-m0) incompressible file first, then a small one: for cancel-inside-a-file tests
 ST="$WORK/st"

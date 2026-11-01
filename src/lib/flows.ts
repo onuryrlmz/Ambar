@@ -53,6 +53,8 @@ export interface JobSummary {
   ok: number;
   skipped: number;
   failures: FileFailure[];
+  /** Files with content the password really opened. */
+  decrypted: number;
   /** The job-level error, when it never produced a report. */
   error: ArchiveError | null;
   /** Files of this job may be in the destination, whatever `kind` says. */
@@ -65,12 +67,15 @@ export interface JobSummary {
 export function summarizeReport(report: OpReport): JobSummary {
   const failures = report.failed;
   const kind = failures.length === 0 ? "ok" : report.ok === 0 ? "failed" : "partial";
-  return { kind, ok: report.ok, skipped: report.skipped, failures, error: null, mayHaveWritten: report.ok > 0 };
+  return {
+    kind, ok: report.ok, skipped: report.skipped, failures, decrypted: report.decrypted ?? 0, error: null,
+    mayHaveWritten: report.ok > 0,
+  };
 }
 
 export function summarizeDone(done: Pick<DoneEvent, "report" | "error">): JobSummary {
   if (done.report) return summarizeReport(done.report);
-  const nothing = { ok: 0, skipped: 0, failures: [], mayHaveWritten: false };
+  const nothing = { ok: 0, skipped: 0, failures: [], decrypted: 0, mayHaveWritten: false };
   if (done.error?.code === "cancelled") return { kind: "cancelled", ...nothing, error: null };
   return { kind: "failed", ...nothing, error: done.error ?? { code: "io", detail: "" } };
 }

@@ -3,7 +3,7 @@
 //! job layer as the window: engines on their own threads, panics caught, `.ambar-part`
 //! output removed on cancel.
 
-use crate::batch::{needs_password, plan_batch, prepare_own_folder, OwnFolderEngine};
+use crate::batch::{needs_password, plan_batch, prepare_own_folder, OwnFolderEngine, PlannedArchive};
 use crate::engine::{open_engine, ArchiveEngine, ExtractRequest, OverwritePolicy, Password};
 use crate::error::ArchiveError;
 use crate::jobs::{ConflictEvent, DoneEvent, EventSink, JobOp, Jobs, ProgressEvent};
@@ -24,6 +24,33 @@ const EXIT_CANCELLED: i32 = 130;
 /// A few times a second is plenty for a person watching a terminal.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 const PROGRESS_NAME_CHARS: usize = 60;
+
+/// For a later volume of a RAR set: it has no run of its own, and is still accounted for.
+pub fn joined_line(part: &Path, first: &Path) -> String {
+    let name = |p: &Path| clean(&p.file_name().map_or_else(|| p.to_string_lossy(), |n| n.to_string_lossy()));
+    format!("{}: volume of {}, handled with it", name(part), name(first))
+}
+
+/// Creates the destination and returns the levels this call made, deepest first.
+pub fn create_dest(dest: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let made: Vec<PathBuf> = dest
+        .ancestors()
+        .take_while(|p| !p.as_os_str().is_empty() && std::fs::symlink_metadata(p).is_err())
+        .map(Path::to_path_buf)
+        .collect();
+    std::fs::create_dir_all(dest).inspect_err(|_| remove_empty_dest(&made))?;
+    Ok(made)
+}
+
+/// Takes back the levels `create_dest` made, as far as they are empty.
+pub fn remove_empty_dest(made: &[PathBuf]) {
+    for level in made {
+        match std::fs::remove_dir(level) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => break,
+            _ => {}
+        }
+    }
+}
 
 const HELP: &str = "\
 Ambar archive manager
@@ -55,11 +82,17 @@ Exit codes:
   130  cancelled with Ctrl+C
 ";
 
-/// Only the exact words: `-psn_*` and any other launch argument still opens the window.
+/// Only these exact words: `-psn_*` and any other launch argument still opens the window.
+/// Our own options count, so a command typed without its word is a usage error.
 pub fn wants_cli(first: Option<&OsStr>) -> bool {
-    first
-        .and_then(OsStr::to_str)
-        .is_some_and(|a| matches!(a, "extract" | "test" | "--help" | "-h" | "--version"))
+    first.and_then(OsStr::to_str).is_some_and(|a| {
+        matches!(
+            a,
+            "extract" | "test" | "--help" | "-h" | "--version"
+                | "--password-stdin" | "--dest" | "--overwrite" | "--separate" | "--no-paths" | "--keep-broken"
+        ) || a.starts_with("--dest=")
+            || a.starts_with("--overwrite=")
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -71,6 +104,8 @@ pub struct ExtractArgs {
     pub keep_paths: bool,
     pub keep_broken: bool,
     pub password_stdin: bool,
+    /// The run's source files. Filled from the plan, not from the arguments.
+    pub protected: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -115,6 +150,7 @@ pub fn parse(args: &[OsString]) -> Result<Command, String> {
         "--version" => return Ok(Command::Version),
         "extract" => true,
         "test" => false,
+        other if other.starts_with('-') => return Err("a command must come first: extract or test".into()),
         other => return Err(format!("unknown command {}", option_name(other))),
     };
 
@@ -179,7 +215,11 @@ pub fn parse(args: &[OsString]) -> Result<Command, String> {
                 }
                 let given = match value {
                     Some(v) => OsString::from(v),
-                    None => rest.next().cloned().ok_or("--dest needs a folder")?,
+                    None => rest
+                        .next()
+                        .filter(|v| !v.as_encoded_bytes().starts_with(b"-"))
+                        .cloned()
+                        .ok_or("--dest needs a folder; for a name starting with - use --dest=<name>")?,
                 };
                 if given.is_empty() {
                     return Err("--dest needs a folder".into());
@@ -196,6 +236,7 @@ pub fn parse(args: &[OsString]) -> Result<Command, String> {
                     None => rest
                         .next()
                         .and_then(|v| v.to_str())
+                        .filter(|v| !v.starts_with('-'))
                         .ok_or("--overwrite must be skip, overwrite or rename")?,
                 };
                 overwrite = Some(parse_policy(given)?);
@@ -221,6 +262,7 @@ pub fn parse(args: &[OsString]) -> Result<Command, String> {
         keep_paths: !no_paths,
         keep_broken,
         password_stdin,
+        protected: Vec::new(),
     }))
 }
 
@@ -314,12 +356,20 @@ fn policy_word(policy: OverwritePolicy) -> &'static str {
 }
 
 /// The last line of a run.
-pub fn totals_line(results: &[ArchiveResult], planned: usize, policy: Option<OverwritePolicy>) -> String {
+pub fn totals_line(
+    results: &[ArchiveResult],
+    planned: usize,
+    joined: usize,
+    policy: Option<OverwritePolicy>,
+) -> String {
     let ok: u64 = results.iter().map(|r| r.ok).sum();
     let skipped: u64 = results.iter().map(|r| r.skipped).sum();
     let failed: usize = results.iter().map(|r| r.failures.len()).sum();
     let plural = if planned == 1 { "" } else { "s" };
     let mut line = format!("Total: {planned} archive{plural}");
+    if joined > 0 {
+        line.push_str(&format!(", {joined} joined"));
+    }
     let with_failures = results.iter().filter(|r| !r.failures.is_empty()).count();
     if with_failures > 0 {
         line.push_str(&format!(", {with_failures} with failures"));
@@ -405,13 +455,14 @@ impl EventSink for CliSink {
 fn run_one(
     index: usize,
     planned: usize,
-    path: &Path,
+    archive: &PlannedArchive,
     extract: Option<&ExtractArgs>,
     password: Option<&Password>,
     make_engine: &Factory,
     jobs: &Jobs,
     cancel: &Arc<AtomicBool>,
 ) -> ArchiveResult {
+    let path = archive.path.as_path();
     let name = path
         .file_name()
         .map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
@@ -420,8 +471,8 @@ fn run_one(
         result.failures.push(Failure::of(&name, e));
         result
     };
-    // Before anything is written: a plain file ahead of an encrypted one would be left
-    // behind by a run that reports only the failure.
+    // No password at all: say so before anything is written. With one that turns out wrong,
+    // the report still counts the files that got out before it stopped the run.
     if password.is_none() && needs_password(path) {
         return failed(result, &ArchiveError::PasswordRequired);
     }
@@ -436,9 +487,10 @@ fn run_one(
                 keep_paths: x.keep_paths,
                 overwrite: x.overwrite,
                 keep_broken: x.keep_broken,
+                protected: x.protected.clone(),
             };
             if x.separate {
-                created = match prepare_own_folder(&mut req, path) {
+                created = match prepare_own_folder(&mut req, path, archive.folder.as_deref()) {
                     Ok(c) => c,
                     Err(e) => return failed(result, &e),
                 };
@@ -494,7 +546,7 @@ fn run_one(
 
 /// Runs the archives one at a time. A failure is that archive's alone; cancel ends the run.
 pub fn run_archives(
-    archives: &[PathBuf],
+    archives: &[PlannedArchive],
     extract: Option<&ExtractArgs>,
     password: Option<Password>,
     make_engine: Factory,
@@ -503,11 +555,11 @@ pub fn run_archives(
     on_result: &mut dyn FnMut(&ArchiveResult),
 ) -> Vec<ArchiveResult> {
     let mut results = Vec::with_capacity(archives.len());
-    for (index, path) in archives.iter().enumerate() {
+    for (index, archive) in archives.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let r = run_one(index, archives.len(), path, extract, password.as_ref(), &make_engine, jobs, cancel);
+        let r = run_one(index, archives.len(), archive, extract, password.as_ref(), &make_engine, jobs, cancel);
         on_result(&r);
         let stop = r.cancelled;
         results.push(r);
@@ -518,8 +570,19 @@ pub fn run_archives(
     results
 }
 
-/// One line from stdin, line ending removed. Sized up front so no growing leaves a copy behind.
+/// A person at a terminal gets a prompt with echo off. Otherwise one line from stdin, line
+/// ending removed, sized up front so no growing leaves a copy behind.
 fn read_password() -> Result<Password, String> {
+    if std::io::stdin().is_terminal() {
+        eprint!("Password: ");
+        let typed = rpassword::read_password()
+            .map(Zeroizing::new)
+            .map_err(|_| "--password-stdin: could not read from the terminal".to_string())?;
+        if typed.is_empty() {
+            return Err("--password-stdin: no password given".into());
+        }
+        return Ok(typed);
+    }
     let mut line = Zeroizing::new(String::with_capacity(4096));
     std::io::stdin()
         .read_line(&mut line)
@@ -559,7 +622,10 @@ fn execute(mut extract: Option<ExtractArgs>, archives: Vec<PathBuf>, password_st
     } else {
         None
     };
+    let plan = plan_batch(archives, password.as_ref());
+    let mut made = Vec::new();
     if let Some(x) = &mut extract {
+        x.protected.clone_from(&plan.protected);
         if x.dest.is_relative() {
             match std::env::current_dir() {
                 Ok(cwd) => x.dest = cwd.join(&x.dest),
@@ -569,13 +635,15 @@ fn execute(mut extract: Option<ExtractArgs>, archives: Vec<PathBuf>, password_st
                 }
             }
         }
-        if let Err(e) = std::fs::create_dir_all(&x.dest) {
-            eprintln!("error: cannot create the destination {}: {}", clean(&x.dest.to_string_lossy()), clean(&e.to_string()));
-            return EXIT_FAILED;
-        }
+        made = match create_dest(&x.dest) {
+            Ok(made) => made,
+            Err(e) => {
+                eprintln!("error: cannot create the destination {}: {}", clean(&x.dest.to_string_lossy()), clean(&e.to_string()));
+                return EXIT_FAILED;
+            }
+        };
     }
 
-    let plan = plan_batch(archives);
     let jobs = Jobs::default();
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -591,8 +659,11 @@ fn execute(mut extract: Option<ExtractArgs>, archives: Vec<PathBuf>, password_st
     }
 
     let mut stdout = std::io::stdout();
+    for part in &plan.joined {
+        let _ = writeln!(stdout, "{}", joined_line(&part.part, &part.first));
+    }
     let results = run_archives(
-        &plan,
+        &plan.archives,
         extract.as_ref(),
         password,
         Arc::new(|p: &Path| open_engine(p)),
@@ -605,9 +676,17 @@ fn execute(mut extract: Option<ExtractArgs>, archives: Vec<PathBuf>, password_st
             let _ = stdout.flush();
         },
     );
-    let _ = writeln!(stdout, "{}", totals_line(&results, plan.len(), extract.as_ref().map(|x| x.overwrite)));
+    let _ = writeln!(stdout, "{}", totals_line(&results, plan.archives.len(), plan.joined.len(), extract.as_ref().map(|x| x.overwrite)));
     let _ = stdout.flush();
-    exit_code(&results, cancel.load(Ordering::Relaxed))
+    let code = exit_code(&results, cancel.load(Ordering::Relaxed));
+    // A destination this run made, and nothing came of it: it does not stay.
+    if let (Some(x), false) = (&extract, made.is_empty()) {
+        if code != EXIT_OK && results.iter().map(|r| r.ok).sum::<u64>() == 0 {
+            crate::batch::prune_empty_tree(&x.dest);
+        }
+        remove_empty_dest(&made);
+    }
+    code
 }
 
 /// Runs the command and returns the process exit code.
@@ -619,12 +698,13 @@ pub fn run(args: &[OsString]) -> i32 {
     std::panic::set_hook(Box::new(|_| {}));
     match parse(args) {
         Err(m) => usage_error(&m),
+        // Write errors are ignored: `ambar --help | head` must not panic on a closed pipe.
         Ok(Command::Help) => {
-            print!("{HELP}");
+            let _ = write!(std::io::stdout(), "{HELP}");
             EXIT_OK
         }
         Ok(Command::Version) => {
-            println!("ambar {}", env!("CARGO_PKG_VERSION"));
+            let _ = writeln!(std::io::stdout(), "ambar {}", env!("CARGO_PKG_VERSION"));
             EXIT_OK
         }
         Ok(Command::Test { archives, password_stdin }) => execute(None, archives, password_stdin),
@@ -661,6 +741,11 @@ mod tests {
         for a in ["extract", "test", "--help", "-h", "--version"] {
             assert!(wants_cli(Some(OsStr::new(a))), "{a}");
         }
+        // Our own options, first by mistake, are a usage error rather than a window.
+        for a in ["--password-stdin", "--dest", "--dest=d", "--overwrite", "--overwrite=skip", "--separate", "--no-paths", "--keep-broken"] {
+            assert!(wants_cli(Some(OsStr::new(a))), "{a}");
+            assert!(parse(&args(&[a])).is_err(), "{a}");
+        }
         for a in ["-psn_0_12345", "Extract", "extract.zip", "/Users/x/a.zip", "--helpful", "-v", "", "testler"] {
             assert!(!wants_cli(Some(OsStr::new(a))), "{a}");
         }
@@ -679,6 +764,7 @@ mod tests {
                 keep_paths: true,
                 keep_broken: false,
                 password_stdin: false,
+                protected: vec![],
             })
         );
     }
@@ -704,6 +790,14 @@ mod tests {
         let Command::Extract(x) = parsed(&["extract", "--dest", "d", "--", "--separate", "-x.zip"]) else { panic!() };
         assert_eq!(x.archives, vec![PathBuf::from("--separate"), PathBuf::from("-x.zip")]);
         assert!(!x.separate);
+    }
+
+    #[test]
+    fn a_dest_starting_with_a_dash_is_only_taken_with_the_equals_form() {
+        let Command::Extract(x) = parsed(&["extract", "a", "--dest=-d"]) else { panic!() };
+        assert_eq!(x.dest, PathBuf::from("-d"));
+        let m = bad(&["extract", "a", "--dest", "-d"]);
+        assert!(m.contains("--dest="), "{m}");
     }
 
     #[test]
@@ -739,6 +833,9 @@ mod tests {
             &["extract", "a", "--dest", "d", "--bilinmez"],
             &["extract", "a", "--dest", "d", "-x"],
             &["extract", "a", "--dest", "d", "--separate=yes"],
+            &["extract", "a", "--dest", "--separate"],
+            &["extract", "a", "--dest", "-d"],
+            &["extract", "a", "--dest", "d", "--overwrite", "-x"],
             &["test"],
             &["test", "a", "--dest", "d"],
             &["test", "a", "--overwrite", "skip"],
@@ -831,13 +928,39 @@ mod tests {
     }
 
     #[test]
+    fn a_joined_part_gets_a_line_of_its_own() {
+        let line = joined_line(Path::new("/d/a.part2.rar"), Path::new("/d/a.part1.rar"));
+        assert_eq!(line, "a.part2.rar: volume of a.part1.rar, handled with it");
+    }
+
+    #[test]
+    fn dest_levels_made_by_this_run_are_removed_only_if_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("a/b/c");
+        let made = create_dest(&dest).unwrap();
+        assert_eq!(made.len(), 3);
+        assert!(dest.is_dir());
+        remove_empty_dest(&made);
+        assert!(!d.path().join("a").exists());
+        let made = create_dest(&dest).unwrap();
+        std::fs::write(dest.join("f"), "x").unwrap();
+        remove_empty_dest(&made);
+        assert!(dest.join("f").exists());
+        std::fs::remove_file(dest.join("f")).unwrap();
+        assert!(create_dest(&dest).unwrap().is_empty(), "already there: not ours");
+        remove_empty_dest(&[]);
+        assert!(dest.is_dir());
+    }
+
+    #[test]
     fn totals_add_up_and_name_the_policy() {
-        let t = totals_line(&[result(2, 1, 0), result(3, 0, 2)], 2, Some(OverwritePolicy::Skip));
+        let t = totals_line(&[result(2, 1, 0), result(3, 0, 2)], 2, 0, Some(OverwritePolicy::Skip));
         assert!(t.starts_with("Total: 2 archives"), "{t}");
         assert!(t.contains("ok 5, skipped 1, failed 2"), "{t}");
         assert!(t.contains("overwrite policy: skip"), "{t}");
-        assert!(!totals_line(&[result(1, 0, 0)], 1, None).contains("policy"));
-        let t = totals_line(&[result(1, 0, 0)], 3, None);
+        assert!(!totals_line(&[result(1, 0, 0)], 1, 0, None).contains("policy"));
+        assert!(totals_line(&[result(1, 0, 0)], 1, 2, None).contains("2 joined"));
+        let t = totals_line(&[result(1, 0, 0)], 3, 0, None);
         assert!(t.contains("2 not started"), "{t}");
     }
 
@@ -865,13 +988,14 @@ mod tests {
                 *seen.lock().unwrap() = pw.map(|p| p.to_string());
             }
             match self.0 {
-                Act::Ok => Ok(OpReport { ok: 2, skipped: 1, failed: vec![] }),
+                Act::Ok => Ok(OpReport { ok: 2, skipped: 1, failed: vec![], decrypted: 0 }),
                 Act::Panic => panic!("boom Sifre-Gizli-9"),
                 Act::Fail => Err(ArchiveError::Corrupt("damaged".into())),
                 Act::Partial => Ok(OpReport {
                     ok: 1,
                     skipped: 0,
                     failed: vec![FileFailure { path: "bad.txt".into(), error: ArchiveError::Corrupt("crc".into()) }],
+                    decrypted: 0,
                 }),
                 Act::WaitCancel => loop {
                     if ctl.cancelled() {
@@ -891,8 +1015,12 @@ mod tests {
         })
     }
 
+    fn planned(names: &[&str]) -> Vec<PlannedArchive> {
+        names.iter().map(|n| PlannedArchive { path: PathBuf::from(n), folder: None }).collect()
+    }
+
     fn drive(names: &[&'static str], script: Vec<(&'static str, Act)>) -> Vec<ArchiveResult> {
-        let paths: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
+        let paths = planned(names);
         let cancel = Arc::new(AtomicBool::new(false));
         run_archives(&paths, None, None, by_name(script), &Jobs::default(), &cancel, &mut |_| {})
     }
@@ -917,7 +1045,7 @@ mod tests {
         let f: Factory = Arc::new(|_| Err(ArchiveError::NotAnArchive));
         let cancel = Arc::new(AtomicBool::new(false));
         let mut seen = vec![];
-        let r = run_archives(&[PathBuf::from("a.txt")], None, None, f, &Jobs::default(), &cancel, &mut |x| seen.push(x.name.clone()));
+        let r = run_archives(&planned(&["a.txt"]), None, None, f, &Jobs::default(), &cancel, &mut |x| seen.push(x.name.clone()));
         assert_eq!(r[0].failures[0].code, "not_archive");
         assert_eq!(r[0].failures[0].path, "a.txt");
         assert_eq!(seen, vec!["a.txt".to_string()]);
@@ -925,7 +1053,7 @@ mod tests {
 
     #[test]
     fn cancel_stops_the_current_archive_and_the_rest() {
-        let paths = vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
+        let paths = planned(&["a", "b", "c"]);
         let cancel = Arc::new(AtomicBool::new(false));
         let jobs = Jobs::default();
         let f = by_name(vec![("a", Act::Ok), ("b", Act::WaitCancel), ("c", Act::Ok)]);
@@ -944,7 +1072,7 @@ mod tests {
     #[test]
     fn nothing_runs_once_cancelled() {
         let cancel = Arc::new(AtomicBool::new(true));
-        let r = run_archives(&[PathBuf::from("a")], None, None, by_name(vec![("a", Act::Ok)]), &Jobs::default(), &cancel, &mut |_| {});
+        let r = run_archives(&planned(&["a"]), None, None, by_name(vec![("a", Act::Ok)]), &Jobs::default(), &cancel, &mut |_| {});
         assert!(r.is_empty());
     }
 
@@ -955,7 +1083,7 @@ mod tests {
         let f: Factory = Arc::new(move |_| Ok(Box::new(Scripted(Act::Ok, Some(s2.clone()))) as Box<dyn ArchiveEngine>));
         let cancel = Arc::new(AtomicBool::new(false));
         let pw = Some(Password::new("parola".into()));
-        run_archives(&[PathBuf::from("a")], None, pw, f, &Jobs::default(), &cancel, &mut |_| {});
+        run_archives(&planned(&["a"]), None, pw, f, &Jobs::default(), &cancel, &mut |_| {});
         assert_eq!(seen.lock().unwrap().as_deref(), Some("parola"));
     }
 }

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toArchiveError } from "./flows.ts";
 import type {
-  ConflictChoice, ConflictEvent, DoneEvent, ExtractRequest, LocalEntry,
+  BatchPlan, ConflictChoice, ConflictEvent, DoneEvent, ExtractRequest, LocalEntry,
   OpenResult, ProgressEvent,
 } from "./types.ts";
 
@@ -60,12 +60,19 @@ export async function watchJob(id: string, handlers: JobHandlers): Promise<() =>
 export const openArchive = (path: string, password: string | null = null) =>
   invoke<OpenResult>("open_archive", { path, password });
 
-/** `separate` puts this archive in its own new folder under `req.dest`, made by the backend. */
-export const startExtract = (id: string, path: string, password: string | null, req: ExtractRequest, separate = false) =>
-  invoke<void>("start_extract", { id, path, password, req, separate });
+/** `ownFolder` puts this archive in its own folder under `req.dest`, made by the backend. */
+export const startExtract = (
+  id: string,
+  path: string,
+  password: string | null,
+  req: ExtractRequest,
+  ownFolder: { name: string | null } | null = null,
+) => invoke<void>("start_extract", { id, path, password, req, ownFolder });
 
-/** The paths in the order a batch runs them. Further parts of a RAR set drop out. */
-export const planBatch = (paths: string[]) => invoke<string[]>("plan_batch", { paths });
+export const planBatch = (paths: string[]) => invoke<BatchPlan>("plan_batch", { paths });
+
+/** What identifies this archive's run, or null while its header stays locked. */
+export const runKey = (path: string, password: string | null) => invoke<string | null>("run_key", { path, password });
 
 export const archiveNeedsPassword = (path: string) => invoke<boolean>("archive_needs_password", { path });
 

@@ -8,6 +8,7 @@ use super::plan::{
     Selection,
 };
 use super::{
+    stopped_by,
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
     Password,
 };
@@ -84,6 +85,20 @@ impl ZipEngine {
         req: Option<&ExtractRequest>,
         ctl: &mut dyn JobCtl,
     ) -> Result<OpReport, ArchiveError> {
+        let mut report = OpReport::default();
+        match self.run(pw, req, ctl, &mut report) {
+            Ok(()) => Ok(report),
+            Err(e) => stopped_by(report, &self.path, e),
+        }
+    }
+
+    fn run(
+        &self,
+        pw: Option<&Password>,
+        req: Option<&ExtractRequest>,
+        ctl: &mut dyn JobCtl,
+        report: &mut OpReport,
+    ) -> Result<(), ArchiveError> {
         let mut ar = self.open()?;
         let metas = Self::metas(&mut ar)?;
         let selection = Selection::of(req);
@@ -92,7 +107,6 @@ impl ZipEngine {
             .iter()
             .filter(|m| !m.entry.is_dir && !m.entry.path.is_empty() && wanted(&m.entry.path))
             .fold(0u64, |acc, m| acc.saturating_add(m.entry.size));
-        let mut report = OpReport::default();
         let mut done = 0u64;
         if ar.has_duplicate_names() {
             // The reader keeps only one of several same-named entries, so some content
@@ -118,7 +132,7 @@ impl ZipEngine {
                 });
             };
             if req.is_some() && m.link {
-                fail(&mut report, ArchiveError::Unsupported("link".into()));
+                fail(report, ArchiveError::Unsupported("link".into()));
                 continue;
             }
             ctl.progress(&entry.path, done, total);
@@ -136,7 +150,7 @@ impl ZipEngine {
                     let plan = match plan_entry(entry, req, ctl) {
                         Ok(p) => p,
                         Err(e @ (ArchiveError::UnsafePath(_) | ArchiveError::DestConflict(_))) => {
-                            fail(&mut report, e);
+                            fail(report, e);
                             continue;
                         }
                         Err(e) => return Err(e),
@@ -149,7 +163,6 @@ impl ZipEngine {
                         PlanOutcome::Nothing => continue,
                         PlanOutcome::Write(dest) if entry.is_dir => {
                             std::fs::create_dir_all(&dest)?;
-                            report.ok += 1;
                             continue;
                         }
                         PlanOutcome::Write(dest) => match open_file(&mut ar, i, entry, pw) {
@@ -190,6 +203,9 @@ impl ZipEngine {
             match result {
                 Ok(()) => {
                     report.ok += 1;
+                    if entry.encrypted && entry.size > 0 {
+                        report.decrypted += 1;
+                    }
                     done += entry.size;
                 }
                 // A wrong key that slipped past the header check fails per entry (a key
@@ -198,11 +214,11 @@ impl ZipEngine {
                     e @ (ArchiveError::Corrupt(_)
                     | ArchiveError::Unsupported(_)
                     | ArchiveError::WrongPassword),
-                ) => fail(&mut report, e),
+                ) => fail(report, e),
                 Err(e) => return Err(e),
             }
         }
-        Ok(report)
+        Ok(())
     }
 }
 
@@ -369,6 +385,7 @@ mod tests {
             keep_paths: true,
             overwrite: OverwritePolicy::Overwrite,
             keep_broken: false,
+            protected: vec![],
         }
     }
 
@@ -624,6 +641,49 @@ mod tests {
         assert_eq!(leftovers(&out), ["ok1.txt", "ok2.txt"]);
     }
 
+    fn mixed_zip(path: &Path) {
+        use ::zip::write::SimpleFileOptions;
+        let mut w = ::zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let o = SimpleFileOptions::default().compression_method(::zip::CompressionMethod::Stored);
+        w.add_directory("alt/", o).unwrap();
+        w.start_file("alt/acik.txt", o).unwrap();
+        w.write_all(b"acik").unwrap();
+        w.start_file("gizli.txt", o.with_aes_encryption(::zip::AesMode::Aes256, "dogru")).unwrap();
+        w.write_all(b"gizli").unwrap();
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn folders_do_not_count_and_only_real_decryption_is_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let z = d.path().join("m.zip");
+        mixed_zip(&z);
+        let out = d.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let mut r = ExtractRequest {
+            dest: out.clone(),
+            selection: vec![],
+            base: String::new(),
+            keep_paths: true,
+            overwrite: crate::engine::OverwritePolicy::Skip,
+            keep_broken: false,
+            protected: vec![],
+        };
+        let mut c = TestCtl { cancel_after: None, choice: ConflictChoice::Skip, seen: vec![] };
+        let rep = ZipEngine::new(&z).extract(Some(&pw("dogru")), &r, &mut c).unwrap();
+        assert_eq!((rep.ok, rep.skipped, rep.decrypted), (2, 0, 1));
+        let rep = ZipEngine::new(&z).extract(Some(&pw("YANLIS")), &r, &mut c).unwrap();
+        assert_eq!((rep.ok, rep.skipped, rep.decrypted), (0, 2, 0), "a rerun writes nothing");
+        assert!(rep.failed.is_empty());
+        // A wrong password keeps the count of what got out before it.
+        r.dest = d.path().join("out2");
+        std::fs::create_dir(&r.dest).unwrap();
+        let rep = ZipEngine::new(&z).extract(Some(&pw("YANLIS")), &r, &mut c).unwrap();
+        assert_eq!((rep.ok, rep.decrypted), (1, 0));
+        assert_eq!(rep.failed[0].error.code(), "wrong_password");
+        assert!(r.dest.join("alt/acik.txt").exists());
+    }
+
     #[test]
     fn aes_encrypted_needs_password() {
         let d = tempfile::tempdir().unwrap();
@@ -743,7 +803,7 @@ mod tests {
         let r = ZipEngine::new(&z)
             .extract(None, &req(&out), &mut ctl())
             .unwrap();
-        assert_eq!((r.ok, r.failed.len()), (2, 0));
+        assert_eq!((r.ok, r.failed.len()), (0, 0), "files only");
         assert!(out.join("bos/alt").is_dir());
     }
 

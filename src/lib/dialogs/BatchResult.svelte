@@ -21,6 +21,7 @@
     if (summary.failedArchives > 0) out.push(t("batch.failedArchives", { n: count(summary.failedArchives) }));
     if (summary.dismissedArchives > 0) out.push(t("batch.dismissedArchives", { n: count(summary.dismissedArchives) }));
     if (summary.notFinished > 0) out.push(t("batch.notFinished", { n: count(summary.notFinished) }));
+    if (summary.joinedParts > 0) out.push(t("batch.joined", { n: count(summary.joinedParts) }));
     if (summary.ok > 0) out.push(t("result.extracted", { n: count(summary.ok) }));
     if (summary.skipped > 0) out.push(t("result.skipped", { n: count(summary.skipped) }));
     if (summary.failed > 0) out.push(t("result.failedCount", { n: count(summary.failed) }));
@@ -30,6 +31,7 @@
 
   const rowMessage = (r: BatchRow): string => {
     if (r.dismissed) return t("batch.dismissed");
+    if (r.volumeOf !== undefined) return t("batch.joinedRow", { first: safeName(r.volumeOf) });
     if (r.more !== undefined) return t("batch.more", { n: formatCount(r.more) });
     return r.error ? errorMessage(r.error) : "";
   };
@@ -55,7 +57,7 @@
   </div>
 
   {#if summary.rows.length > 0}
-    <div class="caption">{t("batch.failures")}</div>
+    <div class="caption">{t("result.details")}</div>
     <div class="rows" style:height="{listH}px">
       <VirtualList items={summary.rows} rowHeight={ROW} overscan={4}>
         {#snippet row(r: BatchRow, _i: number)}

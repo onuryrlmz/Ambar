@@ -10,7 +10,7 @@
 - **Gezinme:** sekmelerde birden çok arşiv, arşiv içinde klasörler, sıralama, klavye ile gezinme ve çoklu seçim. Gizli dosyalar Görünüm menüsünden açılır. Panel oranı ve bu seçim hatırlanır.
 - **Büyük arşivler:** 100.000 girişli bir arşiv yarım saniyede açılır, liste akıcı kayar, pencere çıkartma sırasında da yanıt verir.
 - **Çıkartma:** tümü veya seçilenler, klasör yapısıyla veya yapısız, var olan dosyalar için sor, üzerine yaz, atla ya da yeniden adlandır. Hasarlı dosyaları tutma seçeneği, ilerleme ve İptal. Çıkartılan dosyalar arşivdeki tarihini korur. Arşivden sol panele sürükleyerek de çıkartılır.
-- **Toplu çıkartma:** sol panelde seçili dosyalarla Çıkart, hepsini sırayla çıkartır: parça 2, parça 10'dan önce gelir. Tümü aynı klasöre ya da her arşiv kendi adıyla ayrı klasöre gider. Şifreli arşiv parola sorar, kapatılan soru yalnızca o arşivi atlar. "Tümüne uygula" bütün toplu işe geçerlidir. İptal, o anki arşivi ve kalanları durdurur. Bir arşivin başarısız olması diğerlerini durdurmaz, sonuç penceresi toplamları ve sorunlu arşivleri gösterir. Parçalı bir RAR'ın bütün parçaları seçiliyse küme bir kez çıkartılır.
+- **Toplu çıkartma:** sol panelde seçili dosyalarla Çıkart, hepsini sırayla çıkartır: parça 2, parça 10'dan önce gelir. Tümü aynı klasöre ya da her arşiv kendi adıyla ayrı klasöre gider. Şifreli arşiv parola sorar, kapatılan soru yalnızca o arşivi atlar. "Tümüne uygula" bütün toplu işe geçerlidir. İptal, o anki arşivi ve kalanları durdurur. Bir arşivin başarısız olması diğerlerini durdurmaz, sonuç penceresi toplamları ve sorunlu arşivleri gösterir. Bir RAR'ın parça olduğuna adına değil başlığına bakılarak karar verilir: gerçekten parçalı bir kümenin (`.part2.rar`, eski tür `.r00`) seçili bütün parçaları bir kez çıkartılır ve her parça sonuçta anılır, `yedek.2.rar` gibi bağımsız bir arşiv ise kendi başına işlenir. Aynı ada sahip arşivler ayrı klasörde `foto`, `foto (1)` olur. Bir girdi, işlenen arşivlerin üzerine hiçbir ilkede yazamaz.
 - **Komut satırı:** aynı program pencere açmadan da çalışır, aşağıdaki bölüme bakın.
 - **Sınama ve Bilgi:** arşiv bütünlüğü ve biçim, kilit, kurtarma kaydı, açıklama gibi bilgiler.
 - **Parola:** istenir, oturum boyunca yalnızca bellekte tutulur, diske, günlüğe ya da süreç argümanlarına yazılmaz.
@@ -36,13 +36,13 @@ ambar --help
 ambar --version
 ```
 
-- `--dest` zorunludur, klasör yoksa oluşturulur. Var olan dosyalar için varsayılan `skip`'tir ve son satırda yazar. `--separate` her arşivi hedefin altında kendi adıyla ayrı bir klasöre çıkartır.
+- `--dest` zorunludur, klasör yoksa oluşturulur, sonunda boş kaldıysa yine kaldırılır. `-` ile başlayan bir ad için `--dest=-ad` yazın. Var olan dosyalar için varsayılan `skip`'tir ve son satırda yazar. `--separate` her arşivi hedefin altında kendi adıyla ayrı bir klasöre çıkartır: uzantı ve baştaki noktalar düşer (`.ssh.zip`, `ssh` olur), aynı ad ikinci kez gelirse `foto (1)` olur.
 - Arşivler verildiği sırayla değil, ada ve sayıya göre sırayla işlenir. Bir arşivin başarısız olması diğerlerini durdurmaz.
-- **Parola argüman olarak verilmez**, çünkü argümanlar süreç listesinde görünür. `--password-stdin` standart girdiden bir satır okur ve parola isteyen her arşivde dener: `printf '%s\n' "$PAROLA" | $AMBAR extract a.zip --dest d --password-stdin`. Bu seçenek yoksa parola isteyen arşiv açık bir mesajla başarısız olur, diğerleri sürer.
-- Çıktı İngilizcedir. Arşiv başına bir satır ok, skipped ve failed sayılarını verir, başarısızlar yol ve kodla listelenir, en son satır toplamdır. İlerleme yalnızca stderr bir terminalse, saniyede birkaç kez yazılır.
+- **Parola argüman olarak verilmez**, çünkü argümanlar süreç listesinde görünür. `--password-stdin` standart girdiden bir satır okur ve parola isteyen her arşivde dener: `printf '%s\n' "$PAROLA" | $AMBAR extract a.zip --dest d --password-stdin`. Girdi bir terminalse parola ekrana yansımadan sorulur. Bu seçenek yoksa parola isteyen arşiv açık bir mesajla başarısız olur, diğerleri sürer.
+- Çıktı İngilizcedir. Arşiv başına bir satır ok, skipped ve failed sayılarını verir (`ok` yalnızca dosyaları sayar, klasörleri saymaz), başarısızlar yol ve kodla listelenir, kümenin sonraki parçaları kendi satırıyla anılır, en son satır toplamdır. İlerleme yalnızca stderr bir terminalse, saniyede birkaç kez yazılır.
 - Çıkış kodları: `0` hiçbir şey başarısız olmadı (yalnızca atlananlar da başarıdır), `1` bir öğe ya da arşiv başarısız oldu, `2` kullanım hatası, `130` iptal edildi.
 - Ctrl+C o anki arşivi ve kalanları durdurur, yarım `.ambar-part` dosyaları silinir. İkinci kez basılırsa program beklemeden çıkar ve yarım dosya kalabilir.
-- Komut satırı pencere ya da Dock simgesi açmaz. Yalnızca ilk argüman tam olarak `extract`, `test`, `--help`, `-h` ya da `--version` ise devreye girer, başka her durumda pencere açılır. **Windows'ta denenmedi:** sürüm derlemesi pencere uygulaması olduğundan üst konsola bağlanır, ama bu burada çalıştırılamadı.
+- Komut satırı pencere ya da Dock simgesi açmaz. İlk argüman tam olarak `extract`, `test`, `--help`, `-h` ya da `--version` ise devreye girer. İlk argüman Ambar'ın kendi seçeneklerinden biriyse (`--dest` gibi) kullanım hatası verir, başka her durumda pencere açılır. **Windows'ta denenmedi:** sürüm derlemesi pencere uygulaması olduğundan üst konsola bağlanır, ama bu burada çalıştırılamadı.
 
 ## Henüz olmayanlar
 
@@ -80,6 +80,8 @@ Bugüne dek yalnızca **Mac (Apple Silicon)** üzerinde çalıştırıldı. **Wi
 7z, Mac'te sürüm derlemesinin gerçek penceresinde denendi: düz ve başlıkları şifreli arşiv açıldı, düz arşiv sınandı, ikisi de çıkartıldı, içerik ve tarihler doğru çıktı. Bu arşivler `src-tauri/examples/make_7z.rs` ile üretildi. 7-Zip'in kendi yazdığı bir arşiv pencerede denenmedi, çünkü bu makinede 7-Zip yok.
 
 ## Derleme
+
+Hazır paket henüz yok, Ambar kaynak koddan derlenir. Testler her push ve pull request'te Mac, Ubuntu ve Windows'ta çalışır (`.github/workflows/test.yml`), ama paket ya da sürüm üretilmez.
 
 Gerekenler: Rust, Node.js ve [Tauri 2 önkoşulları](https://tauri.app/start/prerequisites/). UnRAR kütüphanesi C++ olduğu için bir C++ derleyicisi de gerekir.
 

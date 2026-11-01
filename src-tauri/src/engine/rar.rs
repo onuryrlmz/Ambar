@@ -9,6 +9,7 @@
 
 use super::plan::{normalize_entry_path, plan_entry, write_via_temp, PlanOutcome, Selection};
 use super::{
+    stopped_by,
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
     Password,
 };
@@ -77,6 +78,55 @@ mod ffi {
         pub redir_type: u32,
         /// Modification time as Unix seconds (UTC), from the extended time field.
         pub mtime: Option<i64>,
+    }
+
+    /// Answers the library's password question while an archive opens.
+    extern "C" fn answer_password(
+        msg: sys::UINT,
+        user: sys::LPARAM,
+        p1: sys::LPARAM,
+        p2: sys::LPARAM,
+    ) -> c_int {
+        if msg != sys::UCM_NEEDPASSWORDW || user == 0 || p1 == 0 {
+            return -1;
+        }
+        // SAFETY: `user` is the NUL-terminated buffer `volume_flags` holds across the call,
+        // and the library lets us write `p2` units at `p1`.
+        let answer = unsafe { &*(user as *const Vec<sys::WCHAR>) };
+        if answer.len() > p2 as usize {
+            return -1;
+        }
+        unsafe { std::ptr::copy_nonoverlapping(answer.as_ptr(), p1 as *mut sys::WCHAR, answer.len()) };
+        1
+    }
+
+    /// (is a volume, is the first volume), as the file's own main header says. None when it
+    /// cannot say: unreadable, or encrypted headers with no password or the wrong one.
+    pub fn volume_flags(path: &Path, password: Option<&str>) -> Option<(bool, bool)> {
+        let name = os_path(path)?;
+        #[cfg(windows)]
+        let units: Vec<sys::WCHAR> = password.unwrap_or("").encode_utf16().map(|u| u as sys::WCHAR).collect();
+        #[cfg(not(windows))]
+        let units: Vec<sys::WCHAR> = password.unwrap_or("").chars().map(|c| c as u32 as sys::WCHAR).collect();
+        let mut answer = zeroize::Zeroizing::new(units);
+        answer.push(0);
+        let mut data = sys::OpenArchiveDataEx::new(name.as_ptr(), OM_LIST);
+        if password.is_some() {
+            data.callback = Some(answer_password);
+            data.user_data = &*answer as *const Vec<sys::WCHAR> as sys::LPARAM;
+        }
+        // SAFETY: `data`, the name and the answer outlive the call, and the callback only
+        // runs during it. The handle is closed right here, before they go.
+        let handle = unsafe { sys::RAROpenArchiveEx(&mut data as *mut _) };
+        if handle.is_null() {
+            return None;
+        }
+        let (result, flags) = (data.open_result as c_int, data.flags);
+        unsafe { sys::RARCloseArchive(handle) };
+        if result != sys::ERAR_SUCCESS || (flags & sys::ROADF_ENCHEADERS != 0 && password.is_none()) {
+            return None;
+        }
+        Some((flags & sys::ROADF_VOLUME != 0, flags & sys::ROADF_FIRSTVOLUME != 0))
     }
 
     pub struct Flags {
@@ -381,23 +431,80 @@ mod ffi {
 
 pub struct RarEngine {
     path: PathBuf,
+    /// Where this path really opens, once its header could be read.
+    opens_at: std::cell::OnceCell<PathBuf>,
 }
 
-/// The first volume of the set `path` belongs to: what the engine opens for any of its parts.
-pub fn first_volume(path: &Path) -> PathBuf {
-    RarEngine::new(path).first_part()
+/// What a RAR file's own header says about it.
+pub struct VolumeInfo {
+    pub is_volume: bool,
+    /// The file to open: the set's first volume, or `path` itself for anything else.
+    pub first: PathBuf,
+}
+
+/// None while the header cannot be read: encrypted, and no right password yet.
+pub fn volume_info(path: &Path, pw: Option<&Password>) -> Option<VolumeInfo> {
+    let (is_volume, is_first) = ffi::volume_flags(path, pw.map(|p| p.as_str()))?;
+    let first = if is_volume && !is_first {
+        first_volume_name(path)
+    } else {
+        path.to_path_buf()
+    };
+    Some(VolumeInfo { is_volume, first })
+}
+
+/// True for the `.r00` to `.z99` names of an old-style set, whose first file is `.rar`.
+fn has_old_style_extension(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_bytes(), [b'r'..=b'z', b'0'..=b'9', b'0'..=b'9'])
+}
+
+/// The name of the first volume, for a file its header says is a later one.
+fn first_volume_name(path: &Path) -> PathBuf {
+    if !has_old_style_extension(path) {
+        return Archive::new(path).first_part();
+    }
+    let upper = path.with_extension("RAR");
+    let lower = path.with_extension("rar");
+    if std::fs::symlink_metadata(&lower).is_err() && std::fs::symlink_metadata(&upper).is_ok() {
+        upper
+    } else {
+        lower
+    }
+}
+
+/// The volumes of a set present on disk, in order, from its first.
+pub fn set_files(first: &Path) -> Vec<PathBuf> {
+    let there = |p: &PathBuf| std::fs::symlink_metadata(p).is_ok();
+    let archive = Archive::new(first);
+    if archive.nth_part(1).is_some() {
+        return (1..=9999).map_while(|n| archive.nth_part(n).filter(there)).collect();
+    }
+    let mut files = vec![first.to_path_buf()];
+    let names = (b'r'..=b'z').flat_map(|letter| (0..100).map(move |n| format!("{}{n:02}", letter as char)));
+    files.extend(names.map(|ext| first.with_extension(ext)).take_while(there));
+    files
 }
 
 impl RarEngine {
     pub fn new(path: &Path) -> RarEngine {
         RarEngine {
             path: path.to_path_buf(),
+            opens_at: std::cell::OnceCell::new(),
         }
     }
 
-    /// Volume 1 of a multi-volume set (the opened path itself otherwise).
-    fn first_part(&self) -> PathBuf {
-        Archive::new(&self.path).first_part()
+    /// The set's first volume for a file whose header says it is a later one, and the path
+    /// itself for anything else, whatever its name looks like. A header still locked opens
+    /// where it is, and the library then asks for the password.
+    fn first_part(&self, pw: Option<&Password>) -> PathBuf {
+        if let Some(known) = self.opens_at.get() {
+            return known.clone();
+        }
+        match volume_info(&self.path, pw) {
+            Some(info) => self.opens_at.get_or_init(|| info.first).clone(),
+            None => self.path.clone(),
+        }
     }
 
     fn open(
@@ -408,7 +515,7 @@ impl RarEngine {
         want_comment: bool,
     ) -> Result<Arc, ArchiveError> {
         Arc::open(
-            &self.first_part(),
+            &self.first_part(pw),
             mode,
             pw.map(|p| p.as_str()),
             keep_broken,
@@ -435,14 +542,12 @@ impl RarEngine {
             ),
             ffi::ERR_UNKNOWN_FORMAT => ArchiveError::NotAnArchive,
             ffi::ERR_EOPEN => {
-                let first = self.first_part();
+                let first = self.opens_at.get().unwrap_or(&self.path);
                 let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
                 if f.when == When::Open {
-                    // Opening `partN` redirects to part 1; if that is absent say so.
-                    if std::fs::symlink_metadata(&first).is_err()
-                        && Archive::new(&self.path).is_multipart()
-                    {
-                        if let Some(n) = name(&first) {
+                    // A later volume opens at the first; if that is absent say so.
+                    if *first != self.path && std::fs::symlink_metadata(first).is_err() {
+                        if let Some(n) = name(first) {
                             return ArchiveError::MissingVolume(n);
                         }
                     }
@@ -501,6 +606,20 @@ impl RarEngine {
         req: Option<&ExtractRequest>,
         ctl: &mut dyn JobCtl,
     ) -> Result<OpReport, ArchiveError> {
+        let mut report = OpReport::default();
+        match self.run(pw, req, ctl, &mut report) {
+            Ok(()) => Ok(report),
+            Err(e) => stopped_by(report, &self.path, e),
+        }
+    }
+
+    fn run(
+        &self,
+        pw: Option<&Password>,
+        req: Option<&ExtractRequest>,
+        ctl: &mut dyn JobCtl,
+        report: &mut OpReport,
+    ) -> Result<(), ArchiveError> {
         // Listing first surfaces password problems early and gives the byte total.
         let (_, entries) = self.list_inner(pw)?;
         let selection = Selection::of(req);
@@ -511,7 +630,6 @@ impl RarEngine {
             .fold(0u64, |acc, e| acc.saturating_add(e.size));
         let keep_broken = req.is_some_and(|r| r.keep_broken);
 
-        let mut report = OpReport::default();
         let mut done = 0u64;
         let mut index = 0usize; // headers consumed so far
         let mut broke = false;
@@ -588,7 +706,6 @@ impl RarEngine {
                         }
                         PlanOutcome::Write(dest) if entry.is_dir => {
                             std::fs::create_dir_all(&dest)?;
-                            report.ok += 1;
                             skip(&mut ar)?;
                             continue;
                         }
@@ -627,6 +744,9 @@ impl RarEngine {
             match attempt {
                 Ok(()) => {
                     report.ok += 1;
+                    if entry.encrypted && entry.size > 0 {
+                        report.decrypted += 1;
+                    }
                     done += entry.size;
                 }
                 // A damaged file leaves the handle in an unknown state: record it,
@@ -667,27 +787,26 @@ impl RarEngine {
                 });
             }
         }
-        Ok(report)
+        Ok(())
     }
 
     /// UnRAR reports a normal end when the file simply stops at a header boundary, so
     /// verify that the last volume ends with an end-of-archive block. Not possible for
     /// header-encrypted archives (the block is encrypted).
     fn truncation(&self, pw: Option<&Password>) -> Option<ArchiveError> {
+        let mut is_set = false;
         if let Ok(a) = self.open(ffi::OM_LIST, pw, false, false) {
             if a.flags.enc_headers {
                 return None;
             }
+            is_set = a.flags.volume;
         }
-        let first = Archive::new(&self.path);
-        let last = (1..=9999)
-            .map_while(|n| {
-                first
-                    .nth_part(n)
-                    .filter(|p| std::fs::symlink_metadata(p).is_ok())
-            })
-            .last()
-            .unwrap_or_else(|| self.path.clone());
+        let first = self.first_part(pw);
+        let last = if is_set {
+            set_files(&first).pop().unwrap_or(first)
+        } else {
+            first
+        };
         match end_marker_state(&last) {
             Some(false) => Some(ArchiveError::Corrupt(
                 "archive is truncated: end-of-archive block missing".into(),
@@ -884,6 +1003,7 @@ mod tests {
             keep_paths: true,
             overwrite: OverwritePolicy::Overwrite,
             keep_broken: false,
+            protected: vec![],
         }
     }
 
@@ -1159,6 +1279,89 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         eng.extract(None, &req(dest.path()), &mut ctl()).unwrap();
         assert_eq!(fs::read(dest.path().join("buyuk.bin")).unwrap(), buyuk());
+    }
+
+    fn copied(fx: &str, name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(name);
+        fs::copy(fixture(fx), &p).unwrap();
+        (d, p)
+    }
+
+    #[test]
+    fn a_single_archive_with_a_number_in_its_name_opens_itself() {
+        for name in ["rapor.2024.rar", "yedek.2.rar", "a.part2.rar"] {
+            let (_d, p) = copied("plain5.rar", name);
+            let (_, entries) = RarEngine::new(&p).list(None).unwrap();
+            assert!(entries.iter().any(|e| e.path == "kok.txt"), "{name}");
+            let dest = tempfile::tempdir().unwrap();
+            let rep = RarEngine::new(&p).extract(None, &req(dest.path()), &mut ctl()).unwrap();
+            assert!(rep.failed.is_empty(), "{name}: {:?}", rep.failed);
+            assert!(dest.path().join("kok.txt").exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_independent_part2_is_tested_as_itself_not_its_neighbour() {
+        let (d, p2) = copied("plain5.rar", "a.part2.rar");
+        fs::copy(fixture("stored.rar"), d.path().join("a.part1.rar")).unwrap();
+        let (_, entries) = RarEngine::new(&p2).list(None).unwrap();
+        assert!(entries.iter().any(|e| e.path == "belgeler/rapor.txt"));
+        assert!(!entries.iter().any(|e| e.path == "buyuk.bin"));
+    }
+
+    #[test]
+    fn an_old_style_part_opens_its_rar() {
+        let dest = tempfile::tempdir().unwrap();
+        let rep = RarEngine::new(&fixture("old.r00")).extract(None, &req(dest.path()), &mut ctl()).unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+        assert_eq!(fs::read(dest.path().join("buyuk.bin")).unwrap(), buyuk());
+    }
+
+    #[test]
+    fn an_old_style_part_without_its_rar_says_which_is_missing() {
+        let (_d, p) = copied("old.r00", "old.r00");
+        match RarEngine::new(&p).list(None) {
+            Err(ArchiveError::MissingVolume(n)) => assert_eq!(n, "old.rar"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn an_encrypted_header_part_needs_the_password_and_then_opens_the_set() {
+        let p = fixture("envol.part2.rar");
+        assert!(matches!(RarEngine::new(&p).list(None), Err(ArchiveError::PasswordRequired)));
+        let pw = Password::new("Test123".to_string());
+        let dest = tempfile::tempdir().unwrap();
+        let rep = RarEngine::new(&p).extract(Some(&pw), &req(dest.path()), &mut ctl()).unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+        assert_eq!(fs::read(dest.path().join("buyuk.bin")).unwrap(), buyuk());
+    }
+
+    #[test]
+    fn folders_are_not_counted_and_decrypted_only_counts_real_decryption() {
+        let dest = tempfile::tempdir().unwrap();
+        let pw = Password::new("Test123".to_string());
+        let rep = RarEngine::new(&fixture("enc.rar")).extract(Some(&pw), &req(dest.path()), &mut ctl()).unwrap();
+        assert_eq!((rep.ok, rep.skipped, rep.decrypted), (4, 0, 4));
+        let mut skip = req(dest.path());
+        skip.overwrite = OverwritePolicy::Skip;
+        let wrong = Password::new("YANLIS".to_string());
+        let rep = RarEngine::new(&fixture("enc.rar")).extract(Some(&wrong), &skip, &mut ctl()).unwrap();
+        assert_eq!((rep.ok, rep.skipped, rep.decrypted), (0, 4, 0));
+        assert!(rep.failed.is_empty());
+    }
+
+    #[test]
+    fn a_wrong_password_keeps_the_count_of_what_was_written_before_it() {
+        let dest = tempfile::tempdir().unwrap();
+        let wrong = Password::new("YANLIS".to_string());
+        let rep = RarEngine::new(&fixture("mixed.rar")).extract(Some(&wrong), &req(dest.path()), &mut ctl()).unwrap();
+        assert_eq!(rep.ok, 1);
+        assert_eq!(rep.decrypted, 0);
+        assert_eq!(rep.failed.len(), 1);
+        assert_eq!(rep.failed[0].error.code(), "wrong_password");
+        assert!(dest.path().join("acik.txt").exists());
     }
 
     #[test]

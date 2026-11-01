@@ -68,6 +68,9 @@ pub struct ExtractRequest {
     pub keep_paths: bool,
     pub overwrite: OverwritePolicy,
     pub keep_broken: bool,
+    /// Canonical paths no entry may write over, whatever the policy: the sources of the run.
+    #[serde(default)]
+    pub protected: Vec<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,6 +86,20 @@ pub struct OpReport {
     pub ok: u64,
     pub skipped: u64,
     pub failed: Vec<FileFailure>,
+    /// Files with content that a password opened and verified. Only this proves a password:
+    /// skipped files and folders never touched the encrypted data.
+    pub decrypted: u64,
+}
+
+/// What is left of a run a password stopped: files already written still count, so the
+/// report is kept and says why it ended. Any other error, or a run with nothing out, stands.
+pub fn stopped_by(mut report: OpReport, archive: &Path, error: ArchiveError) -> Result<OpReport, ArchiveError> {
+    if report.ok > 0 && matches!(error, ArchiveError::WrongPassword | ArchiveError::PasswordRequired) {
+        report.failed.push(FileFailure { path: archive.to_string_lossy().into_owned(), error });
+        Ok(report)
+    } else {
+        Err(error)
+    }
 }
 
 pub trait JobCtl: Send {

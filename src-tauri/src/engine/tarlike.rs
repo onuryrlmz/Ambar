@@ -561,7 +561,6 @@ impl TarLikeEngine {
                         PlanOutcome::Nothing => return Ok(Flow::Next),
                         PlanOutcome::Write(dest) if entry.is_dir => {
                             std::fs::create_dir_all(&dest)?;
-                            report.ok += 1;
                             return Ok(Flow::Next);
                         }
                         PlanOutcome::Write(dest) => {
@@ -700,6 +699,7 @@ mod tests {
             keep_paths: true,
             overwrite: OverwritePolicy::Overwrite,
             keep_broken: false,
+            protected: vec![],
         }
     }
 
@@ -848,7 +848,7 @@ mod tests {
                 .extract(None, &req(&out), &mut ctl())
                 .unwrap();
             assert!(rep.failed.is_empty(), "{f:?} {:?}", rep.failed);
-            assert_eq!(rep.ok, 3);
+            assert_eq!(rep.ok, 2, "files only");
             assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"alpha");
             assert_eq!(fs::read(out.join("d/b.txt")).unwrap(), b"bravo bravo");
             let rep = TarLikeEngine::new(&a, f).test(None, &mut ctl()).unwrap();

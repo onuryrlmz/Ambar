@@ -90,6 +90,12 @@ pub async fn open_archive(
     blocking(move || open_archive_blocking(&session, Path::new(&path), pw, open_engine)).await
 }
 
+/// `name` comes from `plan_batch`, and is checked again before use. Null: the archive's own.
+#[derive(Debug, serde::Deserialize)]
+pub struct OwnFolder {
+    pub name: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn start_job(
     app: AppHandle,
@@ -98,19 +104,21 @@ fn start_job(
     id: String,
     path: String,
     password: Option<String>,
-    separate: bool,
+    own_folder: Option<OwnFolder>,
     mut op: JobOp,
 ) -> Result<(), ArchiveError> {
-    if let JobOp::Extract(req) = &op {
-        validate_dest(&req.dest)?;
-    }
     let p = PathBuf::from(path);
-    let mut created = None;
-    if let (true, JobOp::Extract(req)) = (separate, &mut op) {
-        created = batch::prepare_own_folder(req, &p)?;
-    }
     let given = wrap_password(password);
     let pw = session.resolve_password(&p, given.clone());
+    let mut created = None;
+    if let JobOp::Extract(req) = &mut op {
+        validate_dest(&req.dest)?;
+        // An entry must never replace the archive being read, in a batch or alone.
+        req.protected.extend(batch::source_files(&p, pw.as_ref()));
+        if let Some(own) = &own_folder {
+            created = batch::prepare_own_folder(req, &p, own.name.as_deref())?;
+        }
+    }
     jobs.start(
         id,
         Arc::new(TauriSink(app)),
@@ -134,11 +142,10 @@ pub async fn start_extract(
     path: String,
     password: Option<String>,
     req: ExtractRequest,
-    separate: Option<bool>,
+    own_folder: Option<OwnFolder>,
 ) -> Result<(), ArchiveError> {
     let (jobs, session) = (jobs.inner().clone(), session.inner().clone());
-    let separate = separate.unwrap_or(false);
-    blocking(move || start_job(app, jobs, session, id, path, password, separate, JobOp::Extract(req))).await
+    blocking(move || start_job(app, jobs, session, id, path, password, own_folder, JobOp::Extract(req))).await
 }
 
 #[tauri::command]
@@ -151,15 +158,29 @@ pub async fn start_test(
     password: Option<String>,
 ) -> Result<(), ArchiveError> {
     let (jobs, session) = (jobs.inner().clone(), session.inner().clone());
-    blocking(move || start_job(app, jobs, session, id, path, password, false, JobOp::Test)).await
+    blocking(move || start_job(app, jobs, session, id, path, password, None, JobOp::Test)).await
 }
 
-/// The order a batch runs in, with a RAR set's further parts gone.
+/// The order a batch runs in, its own-folder names, and the parts a set's first volume covers.
 #[tauri::command]
-pub async fn plan_batch(paths: Vec<String>) -> Result<Vec<String>, ArchiveError> {
+pub async fn plan_batch(paths: Vec<String>) -> Result<batch::BatchPlan, ArchiveError> {
+    blocking(move || Ok(batch::plan_batch(paths.into_iter().map(PathBuf::from).collect(), None))).await
+}
+
+/// What identifies this archive's run, now the password may be known. Lets a batch spot a
+/// later volume of a set whose headers `plan_batch` could not read. Null: still unreadable.
+#[tauri::command]
+pub async fn run_key(
+    session: State<'_, Session>,
+    path: String,
+    password: Option<String>,
+) -> Result<Option<String>, ArchiveError> {
+    let session = session.inner().clone();
+    let pw = wrap_password(password);
     blocking(move || {
-        let plan = batch::plan_batch(paths.into_iter().map(PathBuf::from).collect());
-        Ok(plan.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
+        let path = Path::new(&path);
+        let pw = session.resolve_password(path, pw);
+        Ok(batch::run_key(path, pw.as_ref()).map(|k| k.to_string_lossy().into_owned()))
     })
     .await
 }

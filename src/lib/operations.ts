@@ -1,7 +1,7 @@
 // The flows, connected to the real backend, the dialogs and the panes.
 
 import {
-  answerConflict, archiveNeedsPassword, cancelJob, newJobId, openEntry, openLocal, planBatch, quickLookLocal,
+  answerConflict, archiveNeedsPassword, cancelJob, newJobId, openEntry, openLocal, planBatch, quickLookLocal, runKey,
   startExtract, startTest, watchJob,
 } from "./api.ts";
 import { runBatch } from "./batch.ts";
@@ -16,7 +16,7 @@ import {
 import { localView, refreshLocal } from "./local.svelte.ts";
 import { baseName, type Tab } from "./tabs-core.ts";
 import { openTab, setOpenFailures } from "./tabs.svelte.ts";
-import type { ExtractRequest, TreeNode } from "./types.ts";
+import type { BatchPlan, ExtractRequest, TreeNode } from "./types.ts";
 
 async function job(
   op: ProgressState["op"],
@@ -66,14 +66,14 @@ export async function extractWithDialog(tab: Tab): Promise<void> {
 /** Çıkart with files selected on the left: all of them, one archive at a time. */
 export async function extractBatchWithDialog(paths: string[]): Promise<void> {
   setOpenFailures([]);
-  let plan: string[];
+  let plan: BatchPlan;
   try {
     plan = await planBatch(paths);
   } catch (e) {
     setOpenFailures([{ name: baseName(paths[0]), code: toArchiveError(e).code }]);
     return;
   }
-  const choice = await askBatchExtract(plan.length, localView().cwd);
+  const choice = await askBatchExtract(plan.archives.length, localView().cwd);
   if (!choice) return;
   const req: ExtractRequest = {
     dest: choice.dest,
@@ -81,22 +81,27 @@ export async function extractBatchWithDialog(paths: string[]): Promise<void> {
     keepPaths: choice.keepPaths,
     overwrite: choice.overwrite,
     keepBroken: choice.keepBroken,
+    protected: plan.protected,
   };
-  beginProgress("extract", baseName(plan[0]));
+  const folders = new Map(plan.archives.map((a) => [a.path, a.folder]));
+  const ordered = plan.archives.map((a) => a.path);
+  beginProgress("extract", baseName(ordered[0]));
   try {
-    const summary = await runBatch(plan, {
+    const summary = await runBatch(ordered, {
       newId: newJobId,
       watch: watchJob,
-      start: (id, path, password) => startExtract(id, path, password, req, choice.separate),
+      start: (id, path, password) =>
+        startExtract(id, path, password, req, choice.separate ? { name: folders.get(path) ?? null } : null),
       cancel: cancelJob,
       answer: answerConflict,
       needsPassword: archiveNeedsPassword,
+      runKey,
       askPassword,
       askConflict,
       onProgress: setProgressEvent,
       onArchive: setProgressArchive,
       onControl: setProgressControl,
-    });
+    }, plan.joined);
     endProgress();
     // Even a failed or cancelled run may have written files.
     if (pathsEqual(choice.dest, localView().cwd)) void refreshLocal();
@@ -124,7 +129,7 @@ export async function testArchive(tab: Tab): Promise<void> {
 }
 
 function openFailed(name: string, error: JobSummary["error"]) {
-  return showResult("open", name, { kind: "failed", ok: 0, skipped: 0, failures: [], error, mayHaveWritten: false });
+  return showResult("open", name, { kind: "failed", ok: 0, skipped: 0, failures: [], decrypted: 0, error, mayHaveWritten: false });
 }
 
 /** Göster, double-click, and Space on the Mac (`quickLook`). */

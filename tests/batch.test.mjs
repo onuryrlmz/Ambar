@@ -4,7 +4,7 @@ import { FAILURES_PER_ARCHIVE, runBatch } from "../src/lib/batch.ts";
 import { selectedLocalFiles } from "../src/lib/tabs-core.ts";
 
 const err = (code, detail = "") => ({ code, detail });
-const report = (ok, skipped = 0, failed = []) => ({ report: { ok, skipped, failed }, error: null });
+const report = (ok, skipped = 0, failed = [], decrypted = 0) => ({ report: { ok, skipped, failed, decrypted }, error: null });
 const crash = (code) => ({ report: null, error: err(code) });
 
 /**
@@ -147,8 +147,9 @@ test("a prompt dismissed after a wrong password skips too", async () => {
 
 test("a password that worked is tried first on the next archive that needs one", async () => {
   const typed = [];
+  const opened = () => report(1, 0, [], 1);
   const { deps, log } = backend(
-    {},
+    { "/a.zip": opened, "/b.zip": opened, "/c.zip": opened },
     { locked: ["/a.zip", "/b.zip", "/c.zip"], password: (name) => (typed.push(name), "Parola-1") },
   );
   const s = await runBatch(["/a.zip", "/b.zip", "/c.zip"], deps);
@@ -159,7 +160,7 @@ test("a password that worked is tried first on the next archive that needs one",
 
 test("a tried password that fails prompts, and the new one is kept instead", async () => {
   const right = { "/a.zip": "bir", "/b.zip": "iki", "/c.zip": "iki" };
-  const job = (path) => ({ password }) => (password === right[path] ? report(1) : crash("wrong_password"));
+  const job = (path) => ({ password }) => (password === right[path] ? report(1, 0, [], 1) : crash("wrong_password"));
   const answers = ["bir", "iki"];
   const { deps, log } = backend(
     { "/a.zip": job("/a.zip"), "/b.zip": job("/b.zip"), "/c.zip": job("/c.zip") },
@@ -168,8 +169,59 @@ test("a tried password that fails prompts, and the new one is kept instead", asy
   const s = await runBatch(["/a.zip", "/b.zip", "/c.zip"], deps);
   assert.deepEqual(log.passwords["/b.zip"], ["bir", "iki"]);
   assert.deepEqual(log.passwords["/c.zip"], ["iki"]);
-  assert.deepEqual(log.prompts, ["password:a.zip:false", "password:b.zip:true"]);
+  assert.deepEqual(log.prompts, ["password:a.zip:false", "password:b.zip:false"], "nobody typed a wrong one for b.zip");
   assert.equal(s.okArchives, 3);
+});
+
+test("a password that only skipped files proved nothing, so it is not remembered", async () => {
+  const answers = ["YANLIS", "Parola-2"];
+  const { deps, log } = backend(
+    { "/a.zip": () => report(0, 4, [], 0), "/b.zip": () => report(1, 0, [], 1) },
+    { locked: ["/a.zip", "/b.zip"], password: () => answers.shift() },
+  );
+  await runBatch(["/a.zip", "/b.zip"], deps);
+  assert.deepEqual(log.passwords["/b.zip"], ["Parola-2"]);
+  assert.deepEqual(log.prompts, ["password:a.zip:false", "password:b.zip:false"]);
+});
+
+test("a typed password that really fails says wrong on that archive's next prompt", async () => {
+  const answers = ["yanlis", "dogru"];
+  const { deps, log } = backend(
+    { "/a.zip": ({ password }) => (password === "dogru" ? report(1, 0, [], 1) : crash("wrong_password")) },
+    { locked: ["/a.zip"], password: () => answers.shift() },
+  );
+  await runBatch(["/a.zip"], deps);
+  assert.deepEqual(log.prompts, ["password:a.zip:false", "password:a.zip:true"]);
+});
+
+test("joined volumes are listed and do not change the outcome", async () => {
+  const { deps, log } = backend({});
+  const s = await runBatch(["/d/s.part1.rar"], deps, [{ part: "/d/s.part2.rar", first: "/d/s.part1.rar" }]);
+  assert.deepEqual(log.started, ["/d/s.part1.rar"]);
+  assert.equal(s.kind, "ok");
+  assert.equal(s.total, 1);
+  assert.equal(s.joinedParts, 1);
+  assert.deepEqual(s.rows, [{ archive: "s.part2.rar", path: null, error: null, volumeOf: "s.part1.rar" }]);
+});
+
+test("a later volume found only once the password opened its header is joined, not re-run", async () => {
+  const opened = () => report(2, 0, [], 2);
+  const { deps, log } = backend(
+    { "/d/e.part1.rar": opened, "/d/e.part2.rar": opened, "/d/x.zip": () => report(1) },
+    { locked: ["/d/e.part1.rar", "/d/e.part2.rar"], password: () => "Parola-1" },
+  );
+  deps.runKey = async (path, password) => {
+    log.keys = [...(log.keys ?? []), [path, password]];
+    return path.endsWith(".zip") ? path : password ? "/d/e.part1.rar" : null;
+  };
+  const s = await runBatch(["/d/e.part1.rar", "/d/e.part2.rar", "/d/x.zip"], deps);
+  assert.deepEqual(log.started, ["/d/e.part1.rar", "/d/x.zip"]);
+  assert.equal(s.total, 3);
+  assert.equal(s.joinedParts, 1);
+  assert.equal(s.okArchives, 2);
+  assert.equal(s.notFinished, 0);
+  assert.equal(s.kind, "ok");
+  assert.deepEqual(s.rows, [{ archive: "e.part2.rar", path: null, error: null, volumeOf: "e.part1.rar" }]);
 });
 
 test("a plain archive gets no password, leaving the session cache to the backend", async () => {
