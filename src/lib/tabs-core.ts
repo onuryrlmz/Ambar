@@ -97,6 +97,11 @@ export function selectedPaths(selection: Iterable<string>): string[] {
   return [...out];
 }
 
+/** The selected files among `rows`, in their order. Folders stay out. */
+export function selectedLocalFiles(rows: { isDir: boolean; path: string }[], selection: ReadonlySet<string>): string[] {
+  return rows.filter((r) => !r.isDir && selection.has(rowKey(r))).map((r) => r.path);
+}
+
 /**
  * Moves to `dir`. A folder seen before comes back as we left it; otherwise `cameFrom`
  * (the child folder being left, when going up) gets the cursor.

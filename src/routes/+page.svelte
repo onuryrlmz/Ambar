@@ -15,11 +15,11 @@
   import Icon from "$lib/Icon.svelte";
   import { localModel, localShowHidden, localView, toggleShowHidden } from "$lib/local.svelte.ts";
   import LocalPane from "$lib/LocalPane.svelte";
-  import { extractDragged, extractWithDialog, openLocalFile, openPaths, previewLocalFile, showEntry, testArchive } from "$lib/operations.ts";
+  import { extractBatchWithDialog, extractDragged, extractWithDialog, openLocalFile, openPaths, previewLocalFile, showEntry, testArchive } from "$lib/operations.ts";
   import StatusBar from "$lib/StatusBar.svelte";
   import { activeModel, activeTab, allTabs, closeTab } from "$lib/tabs.svelte.ts";
   import {
-    baseName, clampSplit, fileToShow, isCloseTabKey, isReloadKey, parseSplit, selectedPaths, type Tab,
+    baseName, clampSplit, fileToShow, isCloseTabKey, isReloadKey, parseSplit, selectedLocalFiles, selectedPaths, type Tab,
   } from "$lib/tabs-core.ts";
   import Toolbar, { type ToolAction } from "$lib/Toolbar.svelte";
   import type { TreeNode } from "$lib/types.ts";
@@ -58,8 +58,10 @@
     const tab = activeTab();
     return tab && !tab.loading ? fileToShow(tab, activeModel()) : null;
   });
+  /** With the left pane active, what Çıkart takes first. */
+  const batchFiles = $derived(activePane === "local" ? selectedLocalFiles(localModel().rows, localView().selection) : []);
   const can = $derived<Record<ToolAction, boolean>>({
-    extract: hasArchive,
+    extract: batchFiles.length > 0 || hasArchive,
     test: hasArchive,
     show: toShow !== null,
     info: !!activeTab()?.info,
@@ -158,8 +160,7 @@
       if (tab && dest) void extractDragged(tab, dest);
     } else if (drag.source === "local" && side === "archive") {
       // Only files that turn out to be archives open. The rest do nothing in this stage.
-      const files = localModel().rows.filter((r) => !r.isDir && localView().selection.has("f:" + r.path));
-      void openPaths(files.map((r) => r.path), true).then((showing) => {
+      void openPaths(selectedLocalFiles(localModel().rows, localView().selection), true).then((showing) => {
         if (showing) activate("archive");
       });
     }
@@ -180,6 +181,10 @@
   }
 
   function runAction(action: ToolAction) {
+    if (action === "extract" && batchFiles.length > 0) {
+      void extractBatchWithDialog(batchFiles);
+      return;
+    }
     const tab = activeTab();
     if (!tab || !can[action]) return;
     switch (action) {

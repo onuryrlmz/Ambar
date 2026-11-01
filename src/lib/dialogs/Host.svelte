@@ -1,5 +1,6 @@
 <script lang="ts">
   import About from "./About.svelte";
+  import BatchResult from "./BatchResult.svelte";
   import Conflict from "./Conflict.svelte";
   import Extract from "./Extract.svelte";
   import Info from "./Info.svelte";
@@ -19,13 +20,15 @@
     {#if dialog.kind === "password"}
       <Password name={dialog.name} wrong={dialog.wrong} onDone={dialog.done} />
     {:else if dialog.kind === "extract"}
-      <Extract cwd={dialog.cwd} selectedCount={dialog.selectedCount} dest={dialog.dest} onDone={dialog.done} />
+      <Extract cwd={dialog.cwd} selectedCount={dialog.selectedCount} dest={dialog.dest} batchCount={dialog.batchCount} onDone={dialog.done} />
     {:else if dialog.kind === "conflict"}
       <Conflict path={dialog.path} onDone={dialog.done} />
     {:else if dialog.kind === "risky"}
       <Risky name={dialog.name} onDone={dialog.done} />
     {:else if dialog.kind === "result"}
       <Result op={dialog.op} name={dialog.name} summary={dialog.summary} onDone={dialog.done} />
+    {:else if dialog.kind === "batchResult"}
+      <BatchResult summary={dialog.summary} onDone={dialog.done} />
     {:else if dialog.kind === "info"}
       <Info path={dialog.path} info={dialog.info} onDone={dialog.done} />
     {:else if dialog.kind === "about"}

@@ -1,6 +1,7 @@
 //! Tauri commands. Everything that needs a Tauri runtime lives here; the logic it calls
 //! is tested without one.
 
+use crate::batch::{self, OwnFolderEngine};
 use crate::engine::plan::normalize_entry_path;
 use crate::engine::{
     open_engine, ArchiveEngine, ArchiveInfo, ConflictChoice, Entry, ExtractRequest, Password,
@@ -97,19 +98,25 @@ fn start_job(
     id: String,
     path: String,
     password: Option<String>,
-    op: JobOp,
+    separate: bool,
+    mut op: JobOp,
 ) -> Result<(), ArchiveError> {
     if let JobOp::Extract(req) = &op {
         validate_dest(&req.dest)?;
     }
     let p = PathBuf::from(path);
+    let mut created = None;
+    if let (true, JobOp::Extract(req)) = (separate, &mut op) {
+        created = batch::prepare_own_folder(req, &p)?;
+    }
     let given = wrap_password(password);
     let pw = session.resolve_password(&p, given.clone());
     jobs.start(
         id,
         Arc::new(TauriSink(app)),
         move || {
-            let engine = open_engine(&p)?;
+            let inner = open_engine(&p)?;
+            let engine: Box<dyn ArchiveEngine> = Box::new(OwnFolderEngine { inner, created });
             Ok(Box::new(ConfirmEngine::new(engine, session, p, given)) as Box<dyn ArchiveEngine>)
         },
         pw,
@@ -118,6 +125,7 @@ fn start_job(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_extract(
     app: AppHandle,
     jobs: State<'_, Jobs>,
@@ -126,9 +134,11 @@ pub async fn start_extract(
     path: String,
     password: Option<String>,
     req: ExtractRequest,
+    separate: Option<bool>,
 ) -> Result<(), ArchiveError> {
     let (jobs, session) = (jobs.inner().clone(), session.inner().clone());
-    blocking(move || start_job(app, jobs, session, id, path, password, JobOp::Extract(req))).await
+    let separate = separate.unwrap_or(false);
+    blocking(move || start_job(app, jobs, session, id, path, password, separate, JobOp::Extract(req))).await
 }
 
 #[tauri::command]
@@ -141,7 +151,28 @@ pub async fn start_test(
     password: Option<String>,
 ) -> Result<(), ArchiveError> {
     let (jobs, session) = (jobs.inner().clone(), session.inner().clone());
-    blocking(move || start_job(app, jobs, session, id, path, password, JobOp::Test)).await
+    blocking(move || start_job(app, jobs, session, id, path, password, false, JobOp::Test)).await
+}
+
+/// The order a batch runs in, with a RAR set's further parts gone.
+#[tauri::command]
+pub async fn plan_batch(paths: Vec<String>) -> Result<Vec<String>, ArchiveError> {
+    blocking(move || {
+        let plan = batch::plan_batch(paths.into_iter().map(PathBuf::from).collect());
+        Ok(plan.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
+    })
+    .await
+}
+
+/// Whether a job on this archive would stop for a password nobody has given yet.
+#[tauri::command]
+pub async fn archive_needs_password(session: State<'_, Session>, path: String) -> Result<bool, ArchiveError> {
+    let session = session.inner().clone();
+    blocking(move || {
+        let path = Path::new(&path);
+        Ok(session.resolve_password(path, None).is_none() && batch::needs_password(path))
+    })
+    .await
 }
 
 #[tauri::command]

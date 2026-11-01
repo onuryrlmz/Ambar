@@ -20,7 +20,7 @@ export function toArchiveError(e: unknown): ArchiveError {
   return { code: "io", detail: String(e) };
 }
 
-const isPasswordCode = (code: string) => code === "password_required" || code === "wrong_password";
+export const isPasswordCode = (code: string) => code === "password_required" || code === "wrong_password";
 
 export type OpenOutcome =
   | { kind: "opened"; result: OpenResult }
@@ -97,12 +97,16 @@ export interface JobDeps {
   onProgress?: (ev: ProgressEvent) => void;
   /** Hands over what the progress dialog's İptal calls. */
   onControl?: (control: { cancel: () => void }) => void;
+  /** What the first run tries, for a caller who already asked. Null leaves it to the session cache. */
+  initialPassword?: string | null;
+  /** Tümüne uygula across several jobs: a batch shares one. */
+  applyAll?: { choice: ConflictChoice | null };
 }
 
 /** Runs one job to its end, prompting and re-running on a password error. */
 export async function runJob(deps: JobDeps): Promise<JobSummary> {
-  let password: string | null = null;
-  let applyAll: ConflictChoice | null = null;
+  let password: string | null = deps.initialPassword ?? null;
+  const applyAll = deps.applyAll ?? { choice: null };
   let cancelled = false;
   let currentId: string | null = null;
   let progressed = false;
@@ -123,12 +127,12 @@ export async function runJob(deps: JobDeps): Promise<JobSummary> {
     let choice: ConflictChoice;
     if (cancelled) {
       choice = "cancel";
-    } else if (applyAll) {
-      choice = applyAll;
+    } else if (applyAll.choice) {
+      choice = applyAll.choice;
     } else {
       const a = await deps.askConflict(path);
       choice = a.choice;
-      if (a.applyAll && choice !== "cancel") applyAll = choice;
+      if (a.applyAll && choice !== "cancel") applyAll.choice = choice;
     }
     try {
       await deps.answer(id, choice);

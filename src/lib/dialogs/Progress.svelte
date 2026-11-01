@@ -1,6 +1,6 @@
 <script lang="ts">
   import { safeName, progressView } from "../flows.ts";
-  import { formatBytes } from "../format.ts";
+  import { formatBytes, formatCount } from "../format.ts";
   import { t } from "../i18n/index.ts";
   import Modal from "./Modal.svelte";
   import type { ProgressState } from "./store.svelte.ts";
@@ -12,12 +12,20 @@
 
 <!-- Nothing has the focus at the start: Enter must not cancel by accident. Esc is İptal. -->
 <Modal
-  title="{t(job.op === 'extract' ? 'progress.extracting' : 'progress.testing')}: {safeName(job.name)}"
+  title={job.batch
+    ? t(job.op === "extract" ? "progress.extracting" : "progress.testing")
+    : `${t(job.op === "extract" ? "progress.extracting" : "progress.testing")}: ${safeName(job.name)}`}
   icon={job.op === "extract" ? "extract" : "test"}
   width={460}
   focusPanel
   onEscape={onCancel}
 >
+  {#if job.batch}
+    <div class="overall">
+      <span class="count">{t("progress.batchCount", { i: formatCount(job.batch.index), n: formatCount(job.batch.total) })}</span>
+      <span class="archive" title={safeName(job.name)}>{safeName(job.name)}</span>
+    </div>
+  {/if}
   <div class="current" title={safeName(view.current)}>
     {view.current ? safeName(view.current) : t("progress.waiting")}
   </div>
@@ -43,6 +51,24 @@
 </Modal>
 
 <style>
+  .overall {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    font-size: 13px;
+  }
+  .count {
+    flex: none;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .archive {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .current {
     height: 18px;
     font-size: 12.5px;

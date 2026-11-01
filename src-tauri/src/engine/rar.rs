@@ -383,6 +383,11 @@ pub struct RarEngine {
     path: PathBuf,
 }
 
+/// The first volume of the set `path` belongs to: what the engine opens for any of its parts.
+pub fn first_volume(path: &Path) -> PathBuf {
+    RarEngine::new(path).first_part()
+}
+
 impl RarEngine {
     pub fn new(path: &Path) -> RarEngine {
         RarEngine {

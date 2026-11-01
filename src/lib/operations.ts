@@ -1,11 +1,13 @@
 // The flows, connected to the real backend, the dialogs and the panes.
 
 import {
-  answerConflict, cancelJob, newJobId, openEntry, openLocal, quickLookLocal, startExtract, startTest, watchJob,
+  answerConflict, archiveNeedsPassword, cancelJob, newJobId, openEntry, openLocal, planBatch, quickLookLocal,
+  startExtract, startTest, watchJob,
 } from "./api.ts";
+import { runBatch } from "./batch.ts";
 import {
-  askConflict, askExtract, askPassword, beginProgress, confirmRisky, endProgress, setProgressControl,
-  setProgressEvent, showResult, type ProgressState,
+  askBatchExtract, askConflict, askExtract, askPassword, beginProgress, confirmRisky, endProgress, setProgressArchive,
+  setProgressControl, setProgressEvent, showBatchResult, showResult, type ProgressState,
 } from "./dialogs/store.svelte.ts";
 import {
   extractTarget, localFileGoesToItsApp, openEntryWithPrompts, openLocalWithPrompt, pathsEqual, runJob, safeName, toArchiveError, type JobSummary,
@@ -59,6 +61,49 @@ export async function extractWithDialog(tab: Tab): Promise<void> {
     overwrite: choice.overwrite,
     keepBroken: choice.keepBroken,
   });
+}
+
+/** Çıkart with files selected on the left: all of them, one archive at a time. */
+export async function extractBatchWithDialog(paths: string[]): Promise<void> {
+  setOpenFailures([]);
+  let plan: string[];
+  try {
+    plan = await planBatch(paths);
+  } catch (e) {
+    setOpenFailures([{ name: baseName(paths[0]), code: toArchiveError(e).code }]);
+    return;
+  }
+  const choice = await askBatchExtract(plan.length, localView().cwd);
+  if (!choice) return;
+  const req: ExtractRequest = {
+    dest: choice.dest,
+    ...extractTarget("", [], "folder"),
+    keepPaths: choice.keepPaths,
+    overwrite: choice.overwrite,
+    keepBroken: choice.keepBroken,
+  };
+  beginProgress("extract", baseName(plan[0]));
+  try {
+    const summary = await runBatch(plan, {
+      newId: newJobId,
+      watch: watchJob,
+      start: (id, path, password) => startExtract(id, path, password, req, choice.separate),
+      cancel: cancelJob,
+      answer: answerConflict,
+      needsPassword: archiveNeedsPassword,
+      askPassword,
+      askConflict,
+      onProgress: setProgressEvent,
+      onArchive: setProgressArchive,
+      onControl: setProgressControl,
+    });
+    endProgress();
+    // Even a failed or cancelled run may have written files.
+    if (pathsEqual(choice.dest, localView().cwd)) void refreshLocal();
+    await showBatchResult(summary);
+  } finally {
+    endProgress();
+  }
 }
 
 /** Rows dragged to the left pane: its folder, with the Ask policy. */

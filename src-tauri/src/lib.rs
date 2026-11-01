@@ -1,3 +1,5 @@
+pub mod batch;
+pub mod cli;
 pub mod engine;
 pub mod commands;
 pub mod error;
@@ -45,6 +47,8 @@ pub fn run() {
             commands::open_archive,
             commands::start_extract,
             commands::start_test,
+            commands::plan_batch,
+            commands::archive_needs_password,
             commands::cancel_job,
             commands::answer_conflict,
             commands::list_local,

@@ -60,8 +60,14 @@ export async function watchJob(id: string, handlers: JobHandlers): Promise<() =>
 export const openArchive = (path: string, password: string | null = null) =>
   invoke<OpenResult>("open_archive", { path, password });
 
-export const startExtract = (id: string, path: string, password: string | null, req: ExtractRequest) =>
-  invoke<void>("start_extract", { id, path, password, req });
+/** `separate` puts this archive in its own new folder under `req.dest`, made by the backend. */
+export const startExtract = (id: string, path: string, password: string | null, req: ExtractRequest, separate = false) =>
+  invoke<void>("start_extract", { id, path, password, req, separate });
+
+/** The paths in the order a batch runs them. Further parts of a RAR set drop out. */
+export const planBatch = (paths: string[]) => invoke<string[]>("plan_batch", { paths });
+
+export const archiveNeedsPassword = (path: string) => invoke<boolean>("archive_needs_password", { path });
 
 export const startTest = (id: string, path: string, password: string | null) =>
   invoke<void>("start_test", { id, path, password });

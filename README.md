@@ -10,11 +10,39 @@
 - **Gezinme:** sekmelerde birden çok arşiv, arşiv içinde klasörler, sıralama, klavye ile gezinme ve çoklu seçim. Gizli dosyalar Görünüm menüsünden açılır. Panel oranı ve bu seçim hatırlanır.
 - **Büyük arşivler:** 100.000 girişli bir arşiv yarım saniyede açılır, liste akıcı kayar, pencere çıkartma sırasında da yanıt verir.
 - **Çıkartma:** tümü veya seçilenler, klasör yapısıyla veya yapısız, var olan dosyalar için sor, üzerine yaz, atla ya da yeniden adlandır. Hasarlı dosyaları tutma seçeneği, ilerleme ve İptal. Çıkartılan dosyalar arşivdeki tarihini korur. Arşivden sol panele sürükleyerek de çıkartılır.
+- **Toplu çıkartma:** sol panelde seçili dosyalarla Çıkart, hepsini sırayla çıkartır: parça 2, parça 10'dan önce gelir. Tümü aynı klasöre ya da her arşiv kendi adıyla ayrı klasöre gider. Şifreli arşiv parola sorar, kapatılan soru yalnızca o arşivi atlar. "Tümüne uygula" bütün toplu işe geçerlidir. İptal, o anki arşivi ve kalanları durdurur. Bir arşivin başarısız olması diğerlerini durdurmaz, sonuç penceresi toplamları ve sorunlu arşivleri gösterir. Parçalı bir RAR'ın bütün parçaları seçiliyse küme bir kez çıkartılır.
+- **Komut satırı:** aynı program pencere açmadan da çalışır, aşağıdaki bölüme bakın.
 - **Sınama ve Bilgi:** arşiv bütünlüğü ve biçim, kilit, kurtarma kaydı, açıklama gibi bilgiler.
 - **Parola:** istenir, oturum boyunca yalnızca bellekte tutulur, diske, günlüğe ya da süreç argümanlarına yazılmaz.
 - **Dosya açma:** arşivdeki dosya geçici klasöre çıkartılıp varsayılan uygulamasında açılır, Mac'te boşluk tuşu Quick Look ile önizler. Çalıştırılabilir olabilen türler önce onay ister. Geçici dosyalar kapanışta silinir.
 - **Bırakma:** sistemden pencereye bırakılan arşivler açılır.
 - **Güvenlik:** arşivdeki bir ad, seçilen hedefin dışına dosya yazamaz, bağlantı (symlink, hard link) girdileri oluşturulmaz ve raporda başarısız görünür. Başarısız bir işlem başarılı diye gösterilmez.
+
+## Komut satırı
+
+Örnek: bir klasördeki bütün Google Takeout parçalarını tek `data` klasörüne çıkartmak için
+
+```sh
+AMBAR=/Applications/Ambar.app/Contents/MacOS/ambar
+$AMBAR extract ~/Downloads/takeout-*.zip --dest ~/Downloads/data
+```
+
+Kullanım:
+
+```
+ambar extract <arşiv>... --dest <klasör> [--overwrite skip|overwrite|rename] [--separate] [--no-paths] [--keep-broken] [--password-stdin]
+ambar test <arşiv>... [--password-stdin]
+ambar --help
+ambar --version
+```
+
+- `--dest` zorunludur, klasör yoksa oluşturulur. Var olan dosyalar için varsayılan `skip`'tir ve son satırda yazar. `--separate` her arşivi hedefin altında kendi adıyla ayrı bir klasöre çıkartır.
+- Arşivler verildiği sırayla değil, ada ve sayıya göre sırayla işlenir. Bir arşivin başarısız olması diğerlerini durdurmaz.
+- **Parola argüman olarak verilmez**, çünkü argümanlar süreç listesinde görünür. `--password-stdin` standart girdiden bir satır okur ve parola isteyen her arşivde dener: `printf '%s\n' "$PAROLA" | $AMBAR extract a.zip --dest d --password-stdin`. Bu seçenek yoksa parola isteyen arşiv açık bir mesajla başarısız olur, diğerleri sürer.
+- Çıktı İngilizcedir. Arşiv başına bir satır ok, skipped ve failed sayılarını verir, başarısızlar yol ve kodla listelenir, en son satır toplamdır. İlerleme yalnızca stderr bir terminalse, saniyede birkaç kez yazılır.
+- Çıkış kodları: `0` hiçbir şey başarısız olmadı (yalnızca atlananlar da başarıdır), `1` bir öğe ya da arşiv başarısız oldu, `2` kullanım hatası, `130` iptal edildi.
+- Ctrl+C o anki arşivi ve kalanları durdurur, yarım `.ambar-part` dosyaları silinir. İkinci kez basılırsa program beklemeden çıkar ve yarım dosya kalabilir.
+- Komut satırı pencere ya da Dock simgesi açmaz. Yalnızca ilk argüman tam olarak `extract`, `test`, `--help`, `-h` ya da `--version` ise devreye girer, başka her durumda pencere açılır. **Windows'ta denenmedi:** sürüm derlemesi pencere uygulaması olduğundan üst konsola bağlanır, ama bu burada çalıştırılamadı.
 
 ## Henüz olmayanlar
 

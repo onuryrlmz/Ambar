@@ -13,11 +13,14 @@
     cwd,
     selectedCount,
     dest: initialDest,
+    batchCount = null,
     onDone,
   }: {
     cwd: string;
     selectedCount: number;
     dest: string;
+    /** How many archives a batch holds. Null extracts from the open archive. */
+    batchCount?: number | null;
     onDone: (choice: ExtractChoice | null) => void;
   } = $props();
 
@@ -28,6 +31,7 @@
   let keepPaths = $state(true);
   let keepBroken = $state(false);
   let overwrite = $state<OverwritePolicy>("ask");
+  let placement = $state<"together" | "separate">("together");
   let destError = $state<string | null>(null);
   let checking = $state(false);
 
@@ -57,7 +61,7 @@
     checking = true;
     try {
       await listLocal(path); // a typo stays in the dialog
-      onDone({ dest: path, scope, keepPaths, keepBroken, overwrite });
+      onDone({ dest: path, scope, keepPaths, keepBroken, overwrite, separate: placement === "separate" });
     } catch (e) {
       destError = t("extract.destBad", { message: errorText(toArchiveError(e).code) });
     } finally {
@@ -85,7 +89,20 @@
     <p class="bad" role="alert">{destError}</p>
   {/if}
 
-  {#if selectedCount > 0}
+  {#if batchCount !== null}
+    <p class="note">{t("extract.batchCount", { n: formatCount(batchCount) })}</p>
+    <fieldset>
+      <legend>{t("extract.placement")}</legend>
+      <label class="check">
+        <input type="radio" name="placement" value="together" bind:group={placement} />
+        {t("extract.placeTogether")}
+      </label>
+      <label class="check">
+        <input type="radio" name="placement" value="separate" bind:group={placement} />
+        {t("extract.placeSeparate")}
+      </label>
+    </fieldset>
+  {:else if selectedCount > 0}
     <fieldset>
       <legend>{t("extract.scope")}</legend>
       <label class="check">
