@@ -6,10 +6,10 @@
 
 ## Aşama 1'de neler var
 
-- **Biçimler:** RAR (RAR4, RAR5, şifreli, başlıkları şifreli, parçalı, katı), ZIP (AES ve eski Türkçe adlar dahil), 7z, TAR, GZ, BZ2, XZ. Biçim dosya adından değil, içeriğinden anlaşılır.
-- **Gezinme:** sekmelerde birden çok arşiv, arşiv içinde klasörler, sıralama, klavye ile gezinme ve çoklu seçim. Panel oranı hatırlanır.
+- **Biçimler:** RAR (RAR4, RAR5, şifreli, başlıkları şifreli, parçalı, katı), ZIP (AES ve eski Türkçe adlar dahil), 7z (AES ve şifreli başlık dahil), TAR, GZ, BZ2, XZ. Biçim dosya adından değil, içeriğinden anlaşılır. BZ2 ve XZ dosyalarının boyutu önceden bilinemediği için listede tire görünür.
+- **Gezinme:** sekmelerde birden çok arşiv, arşiv içinde klasörler, sıralama, klavye ile gezinme ve çoklu seçim. Gizli dosyalar Görünüm menüsünden açılır. Panel oranı ve bu seçim hatırlanır.
 - **Büyük arşivler:** 100.000 girişli bir arşiv yarım saniyede açılır, liste akıcı kayar, pencere çıkartma sırasında da yanıt verir.
-- **Çıkartma:** tümü veya seçilenler, klasör yapısıyla veya yapısız, var olan dosyalar için sor, üzerine yaz, atla ya da yeniden adlandır. Hasarlı dosyaları tutma seçeneği, ilerleme ve İptal. Arşivden sol panele sürükleyerek de çıkartılır.
+- **Çıkartma:** tümü veya seçilenler, klasör yapısıyla veya yapısız, var olan dosyalar için sor, üzerine yaz, atla ya da yeniden adlandır. Hasarlı dosyaları tutma seçeneği, ilerleme ve İptal. Çıkartılan dosyalar arşivdeki tarihini korur. Arşivden sol panele sürükleyerek de çıkartılır.
 - **Sınama ve Bilgi:** arşiv bütünlüğü ve biçim, kilit, kurtarma kaydı, açıklama gibi bilgiler.
 - **Parola:** istenir, oturum boyunca yalnızca bellekte tutulur, diske, günlüğe ya da süreç argümanlarına yazılmaz.
 - **Dosya açma:** arşivdeki dosya geçici klasöre çıkartılıp varsayılan uygulamasında açılır, Mac'te boşluk tuşu Quick Look ile önizler. Çalıştırılabilir olabilen türler önce onay ister. Geçici dosyalar kapanışta silinir.
@@ -48,6 +48,8 @@ Ambar geçici (ad-hoc) imzalıdır, Apple Developer kimliğiyle imzalanmamış v
 ## Platformlar
 
 Bugüne dek yalnızca **Mac (Apple Silicon)** üzerinde çalıştırıldı. **Windows ve Linux'ta hiç çalıştırılmadı.** Kod bu sistemleri düşünerek yazıldı, ama derlenmeleri ve çalışmaları doğrulanmış değildir.
+
+7z, Mac'te sürüm derlemesinin gerçek penceresinde denendi: düz ve başlıkları şifreli arşiv açıldı, düz arşiv sınandı, ikisi de çıkartıldı, içerik ve tarihler doğru çıktı. Bu arşivler `src-tauri/examples/make_7z.rs` ile üretildi. 7-Zip'in kendi yazdığı bir arşiv pencerede denenmedi, çünkü bu makinede 7-Zip yok.
 
 ## Derleme
 
