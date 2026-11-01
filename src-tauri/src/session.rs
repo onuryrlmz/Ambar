@@ -296,24 +296,40 @@ mod tests {
         assert!(!t1.exists() && !t2.exists());
     }
 
+    /// Backdates a folder's mtime by two days. The handle is closed before returning.
+    /// Windows opens a folder only with backup semantics, and needs write access to set
+    /// its time; Unix sets it through a plain read-only handle.
+    fn age_dir(dir: &Path) {
+        #[cfg(windows)]
+        let f = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(dir)
+                .unwrap()
+        };
+        #[cfg(not(windows))]
+        let f = std::fs::File::open(dir).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(48 * 3600))
+            .unwrap();
+    }
+
     #[test]
     fn stale_cleanup_only_touches_old_dirs_in_ambar_temp() {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join(TEMP_DIR_NAME);
         std::fs::create_dir_all(root.join("old")).unwrap();
         std::fs::create_dir_all(root.join("fresh")).unwrap();
-        let old = std::fs::File::open(root.join("old")).unwrap();
-        old.set_modified(SystemTime::now() - Duration::from_secs(48 * 3600)).unwrap();
+        age_dir(&root.join("old"));
         Session::new(root.clone()).cleanup_stale();
         assert!(!root.join("old").exists());
         assert!(root.join("fresh").exists());
         // Wrong folder name: refuse to delete anything.
         let other = d.path().join("other");
         std::fs::create_dir_all(other.join("old")).unwrap();
-        std::fs::File::open(other.join("old"))
-            .unwrap()
-            .set_modified(SystemTime::now() - Duration::from_secs(48 * 3600))
-            .unwrap();
+        age_dir(&other.join("old"));
         Session::new(other.clone()).cleanup_stale();
         assert!(other.join("old").exists());
     }
