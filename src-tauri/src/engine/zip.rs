@@ -1133,6 +1133,33 @@ mod tests {
         assert_eq!(crate::engine::disk_mtime(&out.join("a.txt")), listed);
     }
 
+    /// Every byte total a job reported, for a job that never listed first.
+    struct Totals(Vec<u64>);
+    impl JobCtl for Totals {
+        fn progress(&mut self, _: &str, _: u64, total: u64) {
+            self.0.push(total);
+        }
+        fn cancelled(&self) -> bool {
+            false
+        }
+        fn resolve_conflict(&mut self, _: &Path) -> ConflictChoice {
+            ConflictChoice::Overwrite
+        }
+    }
+
+    #[test]
+    fn progress_has_a_total_without_a_prior_list() {
+        let d = tempfile::tempdir().unwrap();
+        let z = d.path().join("a.zip");
+        make(&z, &[("a.txt", b"12345"), ("b.txt", b"678")]);
+        let mut x = Totals(vec![]);
+        ZipEngine::new(&z).extract(None, &req(&d.path().join("o")), &mut x).unwrap();
+        assert_eq!(x.0, [8, 8]);
+        let mut t = Totals(vec![]);
+        ZipEngine::new(&z).test(None, &mut t).unwrap();
+        assert_eq!(t.0, [8, 8]);
+    }
+
     #[test]
     fn entry_with_empty_path_is_skipped() {
         let d = tempfile::tempdir().unwrap();

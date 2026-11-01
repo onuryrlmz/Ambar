@@ -1538,6 +1538,29 @@ mod tests {
     }
 
     #[test]
+    fn progress_has_a_total_without_a_prior_list() {
+        struct Totals(Vec<u64>);
+        impl JobCtl for Totals {
+            fn progress(&mut self, _: &str, _: u64, total: u64) {
+                self.0.push(total);
+            }
+            fn cancelled(&self) -> bool {
+                false
+            }
+            fn resolve_conflict(&mut self, _: &Path) -> ConflictChoice {
+                ConflictChoice::Overwrite
+            }
+        }
+        let dest = tempfile::tempdir().unwrap();
+        let mut x = Totals(vec![]);
+        RarEngine::new(&fixture("plain5.rar")).extract(None, &req(dest.path()), &mut x).unwrap();
+        assert!(!x.0.is_empty() && x.0.iter().all(|&t| t > 0), "{:?}", x.0);
+        let mut t = Totals(vec![]);
+        RarEngine::new(&fixture("plain5.rar")).test(None, &mut t).unwrap();
+        assert!(!t.0.is_empty() && t.0.iter().all(|&n| n > 0), "{:?}", t.0);
+    }
+
+    #[test]
     fn progress_reports_bytes_while_a_file_is_written() {
         struct P(Vec<u64>);
         impl JobCtl for P {

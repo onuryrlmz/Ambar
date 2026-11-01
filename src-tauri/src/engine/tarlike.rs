@@ -16,6 +16,8 @@ use crate::error::ArchiveError;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tar::EntryType;
 
 const BLOCK: u64 = 512;
@@ -24,8 +26,43 @@ pub struct TarLikeEngine {
     path: PathBuf,
     format: Format,
     cache: Option<(ArchiveInfo, Vec<Entry>)>,
-    /// Bytes of regular files, known once the tar was listed (progress total only).
-    file_total: u64,
+    /// Bytes read from the archive file by the current decoder.
+    consumed: Arc<AtomicU64>,
+}
+
+/// Counts what is read from the archive file, below any decompression.
+struct Counting {
+    file: File,
+    read: Arc<AtomicU64>,
+}
+
+impl Read for Counting {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.file.read(buf)?;
+        self.read.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+/// A forward stream knows no entry sizes until it is read, but it knows how far into the
+/// archive file it is. Progress is that, whatever the copy loops pass in.
+struct ArchiveProgress<'a> {
+    ctl: &'a mut dyn JobCtl,
+    consumed: Arc<AtomicU64>,
+    total: u64,
+}
+
+impl JobCtl for ArchiveProgress<'_> {
+    fn progress(&mut self, current: &str, _: u64, _: u64) {
+        let done = self.consumed.load(Ordering::Relaxed).min(self.total);
+        self.ctl.progress(current, done, self.total);
+    }
+    fn cancelled(&self) -> bool {
+        self.ctl.cancelled()
+    }
+    fn resolve_conflict(&mut self, path: &Path) -> super::ConflictChoice {
+        self.ctl.resolve_conflict(path)
+    }
 }
 
 /// What an entry is, as far as extraction is concerned.
@@ -129,7 +166,7 @@ impl TarLikeEngine {
             path: path.to_path_buf(),
             format,
             cache: None,
-            file_total: 0,
+            consumed: Arc::default(),
         }
     }
 
@@ -138,7 +175,11 @@ impl TarLikeEngine {
     }
 
     fn decoder(&self) -> Result<Box<dyn Read>, ArchiveError> {
-        let f = BufReader::new(File::open(&self.path)?);
+        self.consumed.store(0, Ordering::Relaxed);
+        let f = BufReader::new(Counting {
+            file: File::open(&self.path)?,
+            read: self.consumed.clone(),
+        });
         Ok(match self.format {
             Format::Tar => Box::new(f),
             Format::TarGz | Format::Gz => Box::new(flate2::bufread::MultiGzDecoder::new(f)),
@@ -402,13 +443,9 @@ impl TarLikeEngine {
         }
     }
 
-    fn list_tar(&self) -> Result<(Vec<Entry>, u64), ArchiveError> {
+    fn list_tar(&self) -> Result<Vec<Entry>, ArchiveError> {
         let mut out = Vec::new();
-        let mut total = 0u64;
         let bad = self.stream(&mut NoCtl, &mut |item, _, _| {
-            if item.kind == Kind::File {
-                total = total.saturating_add(item.entry.size);
-            }
             if !item.entry.path.is_empty() {
                 out.push(item.entry);
             }
@@ -416,8 +453,19 @@ impl TarLikeEngine {
         })?;
         match bad {
             Some(msg) => Err(ArchiveError::Corrupt(msg)),
-            None => Ok((out, total)),
+            None => Ok(out),
         }
+    }
+
+    fn archive_progress<'a>(
+        &self,
+        ctl: &'a mut dyn JobCtl,
+    ) -> Result<ArchiveProgress<'a>, ArchiveError> {
+        Ok(ArchiveProgress {
+            ctl,
+            consumed: self.consumed.clone(),
+            total: std::fs::metadata(&self.path)?.len(),
+        })
     }
 
     fn process_tar(
@@ -425,11 +473,10 @@ impl TarLikeEngine {
         req: Option<&ExtractRequest>,
         ctl: &mut dyn JobCtl,
     ) -> Result<OpReport, ArchiveError> {
-        let total = self.file_total;
+        let mut ctl = self.archive_progress(ctl)?;
         let mut report = OpReport::default();
-        let mut done = 0u64;
         let selection = Selection::of(req);
-        let bad = self.stream(ctl, &mut |item, data, ctl| {
+        let bad = self.stream(&mut ctl, &mut |item, data, ctl| {
             if ctl.cancelled() {
                 return Err(ArchiveError::Cancelled);
             }
@@ -449,10 +496,10 @@ impl TarLikeEngine {
                 }
                 return Ok(Flow::Next);
             }
-            ctl.progress(&entry.path, done, total);
+            ctl.progress(&entry.path, 0, 0);
             let result = match req {
                 None if entry.is_dir => return Ok(Flow::Next),
-                None => copy_stream(data, None, &entry.path, ctl, done, total).map(|_| ()),
+                None => copy_stream(data, None, &entry.path, ctl, 0, 0).map(|_| ()),
                 Some(req) => {
                     let plan = match plan_entry(entry, req, ctl) {
                         Ok(p) => p,
@@ -474,7 +521,7 @@ impl TarLikeEngine {
                             return Ok(Flow::Next);
                         }
                         PlanOutcome::Write(dest) => {
-                            write_entry(&dest, req.keep_broken, data, entry, ctl, done, total)
+                            write_entry(&dest, req.keep_broken, data, entry, ctl, 0, 0)
                         }
                     }
                 }
@@ -482,7 +529,6 @@ impl TarLikeEngine {
             match result {
                 Ok(()) => {
                     report.ok += 1;
-                    done = done.saturating_add(entry.size);
                     Ok(Flow::Next)
                 }
                 Err(e @ ArchiveError::Corrupt(_)) => {
@@ -511,6 +557,8 @@ impl TarLikeEngine {
         if !Selection::of(req).has(&entry.path) {
             return Ok(report);
         }
+        let mut ctl = self.archive_progress(ctl)?;
+        let ctl: &mut dyn JobCtl = &mut ctl;
         let mut data = self.decoder()?;
         ctl.progress(&entry.path, 0, 0);
         let result = match req {
@@ -552,9 +600,7 @@ impl ArchiveEngine for TarLikeEngine {
         let entries = if self.single() {
             vec![self.single_entry()]
         } else {
-            let (entries, total) = self.list_tar()?;
-            self.file_total = total;
-            entries
+            self.list_tar()?
         };
         let c = (self.info()?, entries);
         self.cache = Some(c.clone());
@@ -1075,6 +1121,72 @@ mod tests {
         }
     }
 
+    /// Every progress call of a job that never listed first, as (done, total).
+    #[derive(Default)]
+    struct Marks(Vec<(u64, u64)>);
+    impl JobCtl for Marks {
+        fn progress(&mut self, _: &str, done: u64, total: u64) {
+            self.0.push((done, total));
+        }
+        fn cancelled(&self) -> bool {
+            false
+        }
+        fn resolve_conflict(&mut self, _: &Path) -> crate::engine::ConflictChoice {
+            crate::engine::ConflictChoice::Overwrite
+        }
+    }
+
+    /// Does not compress much, so progress has something to show.
+    fn noise(n: usize) -> Vec<u8> {
+        let mut x = 0x2545_F491u32;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn progress_has_a_total_without_a_prior_list() {
+        let big = noise(5 * 1024 * 1024);
+        let tar = tar_of(&[file("a.txt", b"alpha"), file("big.bin", &big)], 2);
+        let cases = [
+            (Format::Tar, "a.tar"),
+            (Format::TarGz, "a.tar.gz"),
+            (Format::TarBz2, "a.tar.bz2"),
+            (Format::TarXz, "a.tar.xz"),
+            (Format::Gz, "a.bin.gz"),
+            (Format::Bz2, "a.bin.bz2"),
+            (Format::Xz, "a.bin.xz"),
+        ];
+        for (f, name) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let a = write(dir.path(), name, &pack(f, &tar));
+            let size = fs::metadata(&a).unwrap().len();
+            let out = dir.path().join("out");
+            let mut x = Marks::default();
+            let rep = TarLikeEngine::new(&a, f).extract(None, &req(&out), &mut x).unwrap();
+            assert!(rep.failed.is_empty(), "{f:?} {:?}", rep.failed);
+            let mut t = Marks::default();
+            let rep = TarLikeEngine::new(&a, f).test(None, &mut t).unwrap();
+            assert!(rep.failed.is_empty(), "{f:?} {:?}", rep.failed);
+            for marks in [&x.0, &t.0] {
+                assert!(!marks.is_empty(), "{f:?}");
+                assert!(marks.iter().all(|m| m.1 == size), "{f:?} {marks:?} of {size}");
+                assert!(marks.iter().all(|m| m.0 <= size), "{f:?} {marks:?} of {size}");
+                assert!(marks.windows(2).all(|w| w[0].0 <= w[1].0), "{f:?} {marks:?}");
+                // A bar that moves: some mark lands well inside the file.
+                assert!(
+                    marks.iter().any(|m| m.0 > size / 8 && m.0 < size),
+                    "{f:?} {marks:?} of {size}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn untrusted_sparse_sizes_do_not_overflow_totals() {
         let t = tar_of(
@@ -1096,8 +1208,8 @@ mod tests {
             .unwrap();
         assert_eq!(rep.ok, 1);
         assert_eq!(rep.failed.len(), 2);
-        // the progress total counts only what is extracted
-        assert_eq!(tot.0, [5]);
+        // the progress total is the archive file, whatever its headers claim
+        assert_eq!(tot.0, [fs::metadata(&a).unwrap().len()]);
         let rep = TarLikeEngine::new(&a, Format::Tar)
             .test(None, &mut ctl())
             .unwrap();

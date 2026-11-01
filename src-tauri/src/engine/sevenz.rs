@@ -505,6 +505,33 @@ mod tests {
         fs::write(path, c.into_inner()).unwrap();
     }
 
+    /// Every byte total a job reported, for a job that never listed first.
+    struct Totals(Vec<u64>);
+    impl JobCtl for Totals {
+        fn progress(&mut self, _: &str, _: u64, total: u64) {
+            self.0.push(total);
+        }
+        fn cancelled(&self) -> bool {
+            false
+        }
+        fn resolve_conflict(&mut self, _: &Path) -> ConflictChoice {
+            ConflictChoice::Overwrite
+        }
+    }
+
+    #[test]
+    fn progress_has_a_total_without_a_prior_list() {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("a.7z");
+        build(&a, &[("a.txt", b"12345", None), ("b.txt", b"678", None)], &Opts::default());
+        let mut x = Totals(vec![]);
+        SevenZEngine::new(&a).extract(None, &req(&d.path().join("o")), &mut x).unwrap();
+        assert_eq!(x.0, [8, 8]);
+        let mut t = Totals(vec![]);
+        SevenZEngine::new(&a).test(None, &mut t).unwrap();
+        assert_eq!(t.0, [8, 8]);
+    }
+
     #[test]
     fn extracted_file_keeps_its_time() {
         let d = tempfile::tempdir().unwrap();
