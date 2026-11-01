@@ -3,20 +3,20 @@
 //! every output path goes through `plan_entry`, and files are written to a temp
 //! file via `write_via_temp`.
 
-use super::plan::{is_selected, normalize_entry_path, plan_entry, write_via_temp, PlanOutcome};
+use super::plan::{
+    copy_stream, is_selected, normalize_entry_path, plan_entry, write_via_temp, PlanOutcome,
+};
 use super::{
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
     Password,
 };
 use crate::error::ArchiveError;
 use std::fs::File;
-use std::io::{BufReader, ErrorKind, Read, Seek, Write};
+use std::io::{BufReader, ErrorKind, Read, Seek};
 use std::path::{Path, PathBuf};
 use zip::result::ZipError;
 use zip::ZipArchive;
 
-const CHUNK: usize = 64 * 1024;
-const PROGRESS_STEP: u64 = 1024 * 1024;
 const S_IFMT: u32 = 0o170000;
 const S_IFLNK: u32 = 0o120000;
 
@@ -223,43 +223,15 @@ fn open_file<'a>(
     }
 }
 
-/// Streams `src` to `out` (or nowhere). Checks cancel on every chunk and reports
-/// progress about once per MiB. The zip reader verifies the CRC at end of data.
 fn copy(
     src: &mut impl Read,
-    mut out: Option<&mut File>,
+    out: Option<&mut File>,
     entry: &Entry,
     ctl: &mut dyn JobCtl,
     done: u64,
     total: u64,
 ) -> Result<u64, ArchiveError> {
-    let mut buf = vec![0u8; CHUNK];
-    let mut bytes = 0u64;
-    let mut reported = 0u64;
-    loop {
-        if ctl.cancelled() {
-            return Err(ArchiveError::Cancelled);
-        }
-        let n = match src.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            // Every failure of the zip reader (bad stream, CRC, truncation) is a data error.
-            Err(e) => return Err(ArchiveError::Corrupt(format!("{}: {e}", entry.path))),
-        };
-        if let Some(out) = out.as_deref_mut() {
-            out.write_all(&buf[..n])?;
-        }
-        bytes += n as u64;
-        if bytes - reported >= PROGRESS_STEP {
-            reported = bytes;
-            ctl.progress(&entry.path, done + bytes, total);
-        }
-    }
-    if let Some(out) = out {
-        out.flush()?;
-    }
-    Ok(bytes)
+    copy_stream(src, out, &entry.path, ctl, done, total)
 }
 
 fn map_zip(e: ZipError) -> ArchiveError {
@@ -355,6 +327,7 @@ mod tests {
     use ::zip::{CompressionMethod, ZipWriter};
     use std::fs;
     use std::fs::File;
+    use std::io::Write;
     use std::path::PathBuf;
 
     fn pw(s: &str) -> Password {

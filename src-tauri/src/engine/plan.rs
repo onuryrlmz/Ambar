@@ -4,6 +4,8 @@
 use super::{ConflictChoice, Entry, ExtractRequest, JobCtl, OverwritePolicy};
 use crate::error::ArchiveError;
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
@@ -261,6 +263,80 @@ pub fn write_via_temp(
             Err(e)
         }
     }
+}
+
+const CHUNK: usize = 64 * 1024;
+const PROGRESS_STEP: u64 = 1024 * 1024;
+
+/// Streams `src` to `out` (or nowhere). Checks cancel on every chunk and reports
+/// progress about once per MiB. Any failure of the reader is a data error
+/// (`Corrupt`), whichever `io::ErrorKind` the decoder used; write failures stay
+/// `Io`/`DiskFull` through `From<io::Error>`.
+pub fn copy_stream(
+    src: &mut dyn Read,
+    mut out: Option<&mut File>,
+    path: &str,
+    ctl: &mut dyn JobCtl,
+    done: u64,
+    total: u64,
+) -> Result<u64, ArchiveError> {
+    let mut buf = vec![0u8; CHUNK];
+    let mut bytes = 0u64;
+    let mut reported = 0u64;
+    loop {
+        if ctl.cancelled() {
+            return Err(ArchiveError::Cancelled);
+        }
+        let n = match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ArchiveError::Corrupt(format!("{path}: {e}"))),
+        };
+        if let Some(out) = out.as_deref_mut() {
+            out.write_all(&buf[..n])?;
+        }
+        bytes += n as u64;
+        if bytes - reported >= PROGRESS_STEP {
+            reported = bytes;
+            ctl.progress(path, done + bytes, total);
+        }
+    }
+    if let Some(out) = out {
+        out.flush()?;
+    }
+    Ok(bytes)
+}
+
+/// Writes one entry's data to `dest` via a temp file. On `Corrupt` the partial
+/// output follows `keep_broken`; cancel, disk and permission errors always remove it.
+pub fn write_entry(
+    dest: &Path,
+    keep_broken: bool,
+    src: &mut dyn Read,
+    path: &str,
+    ctl: &mut dyn JobCtl,
+    done: u64,
+    total: u64,
+) -> Result<(), ArchiveError> {
+    write_via_temp(dest, keep_broken, |tmp| {
+        let r = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)
+            .map_err(ArchiveError::from)
+            .and_then(|mut out| {
+                copy_stream(src, Some(&mut out), path, ctl, done, total).map(|_| ())
+            });
+        match r {
+            Err(e @ ArchiveError::Corrupt(_)) => Err(e),
+            Err(e) => {
+                let _ = std::fs::remove_file(tmp);
+                Err(e)
+            }
+            Ok(()) => Ok(()),
+        }
+    })
 }
 
 #[cfg(test)]

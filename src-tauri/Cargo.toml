@@ -25,6 +25,11 @@ unrar-ng = "0.7"
 unrar-ng-sys = "0.7"
 zip = { version = "9", default-features = false, features = ["aes-crypto", "deflate", "bzip2", "zstd"] }
 oem_cp = "2"
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["aes256", "compress", "bzip2", "ppmd"] }
+tar = "0.4"
+flate2 = "1"
+bzip2 = "0.6"
+liblzma = { version = "0.4", features = ["static"] }
 
 [dev-dependencies]
 tempfile = "3"

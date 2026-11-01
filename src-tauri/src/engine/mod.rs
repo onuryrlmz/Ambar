@@ -1,6 +1,8 @@
 pub mod detect;
 pub mod plan;
 pub mod rar;
+pub mod sevenz;
+pub mod tarlike;
 pub mod zip;
 
 use crate::error::ArchiveError;
@@ -101,13 +103,13 @@ pub trait ArchiveEngine: Send {
     ) -> Result<OpReport, ArchiveError>;
 }
 
-/// Opens the engine for the archive at `path`. Engines for the other formats are
-/// wired in later tasks.
+/// Opens the engine for the archive at `path`.
 pub fn open_engine(path: &Path) -> Result<Box<dyn ArchiveEngine>, ArchiveError> {
     match detect_format(path)? {
         Format::Rar => Ok(Box::new(rar::RarEngine::new(path))),
         Format::Zip => Ok(Box::new(zip::ZipEngine::new(path))),
-        format => Err(ArchiveError::Unsupported(format!("{format:?}"))),
+        Format::SevenZ => Ok(Box::new(sevenz::SevenZEngine::new(path))),
+        format => Ok(Box::new(tarlike::TarLikeEngine::new(path, format))),
     }
 }
 
