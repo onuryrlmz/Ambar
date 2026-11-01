@@ -10,6 +10,7 @@
   import Host from "$lib/dialogs/Host.svelte";
   import { modalOpen, showAbout, showInfo } from "$lib/dialogs/store.svelte.ts";
   import { isMac } from "$lib/FileList.svelte";
+  import { safeName } from "$lib/flows.ts";
   import { getLang, setLang, t, type Lang } from "$lib/i18n/index.ts";
   import Icon from "$lib/Icon.svelte";
   import { localModel, localView } from "$lib/local.svelte.ts";
@@ -132,7 +133,7 @@
     const selection = source === "local" ? localView().selection : activeTab()?.selection;
     if (!selection || selection.size === 0) return;
     const paths = selectedPaths(selection);
-    const label = paths.length === 1 ? baseName(paths[0]) : t("drag.count", { n: paths.length });
+    const label = paths.length === 1 ? safeName(baseName(paths[0])) : t("drag.count", { n: paths.length });
     itemDrag = { source, x, y, label, over: null };
   }
 
@@ -306,7 +307,10 @@
     void initJobEvents().catch(() => {});
     const unlisten = listen<string>("menu", (e) => onMenu(e.payload));
     const undrop = getCurrentWebview().onDragDropEvent(({ payload }) => {
-      if (payload.type === "drop") {
+      // A drop behind a modal is ignored, and the ring must not promise otherwise.
+      if (modalOpen()) {
+        osDropping = false;
+      } else if (payload.type === "drop") {
         osDropping = false;
         void openPaths(payload.paths).then((showing) => {
           if (showing) activate("archive");

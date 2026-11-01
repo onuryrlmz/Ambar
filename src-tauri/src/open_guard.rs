@@ -59,6 +59,22 @@ pub fn check_local_open(path: &Path, allow_risky: bool) -> Result<(), ArchiveErr
     for p in [path, real.as_path()] {
         check_risky(&p.file_name().unwrap_or_default().to_string_lossy(), allow_risky)?;
     }
+    check_exec_bits(&real, allow_risky)
+}
+
+/// A file with any execute bit launches as a program, whatever its name (`mdls` calls an
+/// extensionless one `public.unix-executable`). Windows has no such bit: its list decides.
+#[cfg(unix)]
+fn check_exec_bits(real: &Path, allow_risky: bool) -> Result<(), ArchiveError> {
+    use std::os::unix::fs::PermissionsExt;
+    if !allow_risky && std::fs::metadata(real)?.permissions().mode() & 0o111 != 0 {
+        return Err(ArchiveError::RiskyOpen("executable".into()));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_exec_bits(_real: &Path, _allow_risky: bool) -> Result<(), ArchiveError> {
     Ok(())
 }
 
@@ -175,6 +191,30 @@ mod tests {
         std::fs::write(&risky, b"x").unwrap();
         assert!(matches!(check_local_open(&risky, false), Err(ArchiveError::RiskyOpen(_))));
         check_local_open(&risky, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_open_treats_any_exec_bit_as_risky_whatever_the_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        for name in ["tool", "belge.txt"] {
+            let f = d.path().join(name);
+            std::fs::write(&f, b"x").unwrap();
+            for mode in [0o755, 0o744, 0o654, 0o645] {
+                std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+                assert!(matches!(check_local_open(&f, false), Err(ArchiveError::RiskyOpen(_))), "{name} {mode:o}");
+                check_local_open(&f, true).unwrap();
+            }
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+            check_local_open(&f, false).unwrap();
+        }
+        // The target's bits count, not the link's.
+        let tool = d.path().join("tool");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = d.path().join("masum");
+        std::os::unix::fs::symlink(&tool, &link).unwrap();
+        assert!(matches!(check_local_open(&link, false), Err(ArchiveError::RiskyOpen(_))));
     }
 
     #[cfg(unix)]

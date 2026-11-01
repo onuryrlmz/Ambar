@@ -42,7 +42,7 @@
     const out: string[] = [];
     if (summary.kind === "cancelled") {
       out.push(errorText("cancelled"));
-      if (op === "extract") out.push(t("result.partialNote"));
+      if (op === "extract" && summary.mayHaveWritten) out.push(t("result.partialNote"));
       return out;
     }
     if (summary.error) {

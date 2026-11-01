@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  describeOpenFailures, extractTarget, openEntryWithPrompts, openLocalWithPrompt, openWithPassword, pathsEqual,
-  progressView, runJob, safeName, summarizeDone, summarizeReport, toArchiveError,
+  describeOpenFailures, extractTarget, goUpFlow, openEntryWithPrompts, openLocalWithPrompt, openWithPassword, pathsEqual,
+  progressView, runJob, safeName, safeText, summarizeDone, summarizeReport, toArchiveError,
 } from "../src/lib/flows.ts";
+import { readFileSync } from "node:fs";
 import { emptyTabs, openTab, openedTab } from "../src/lib/tabs-core.ts";
 
 const err = (code, detail = "") => ({ code, detail });
@@ -458,8 +459,8 @@ test("progressView floors and clamps", () => {
 });
 
 test("safeName shows control and bidi characters as a marker", () => {
-  assert.equal(safeName("a‮txt.sh"), "a�txt.sh");
-  assert.equal(safeName("satır\nyeni"), "satır�yeni");
+  assert.equal(safeName("a\u202Etxt.sh"), "a\uFFFDtxt.sh");
+  assert.equal(safeName("satır\nyeni"), "satır\uFFFDyeni");
   assert.equal(safeName("türkçe 🙂.txt"), "türkçe 🙂.txt");
 });
 
@@ -487,4 +488,139 @@ test("describeOpenFailures: one, several of one code, several of mixed codes", (
 test("toArchiveError keeps code and detail and wraps anything else", () => {
   assert.deepEqual(toArchiveError(err("corrupt", "x")), err("corrupt", "x"));
   assert.equal(toArchiveError(new Error("boom")).code, "io");
+});
+
+test("cancelling a job's password prompt is silent when nothing ran to completion", async () => {
+  const { deps } = fakeJobs([doneErr("password_required")]);
+  const s = await runJob(deps);
+  assert.equal(s.kind, "cancelled");
+  assert.equal(s.dismissed, true);
+  assert.equal(s.mayHaveWritten, false);
+});
+
+test("a wrong-password run that wrote nothing, then a cancelled prompt, is silent too", async () => {
+  const run = (h, id) => {
+    h.onProgress({ id, current: "a", doneBytes: 0, totalBytes: 5 });
+    h.onDone({ id, report: { ok: 0, skipped: 0, failed: [{ path: "a", error: err("wrong_password") }] }, error: null });
+  };
+  const s = await runJob(fakeJobs([run]).deps);
+  assert.equal(s.dismissed, true);
+  assert.equal(s.mayHaveWritten, false);
+});
+
+test("a cancelled prompt keeps a report from any earlier run that got files out", async () => {
+  const mixed = (h, id) =>
+    h.onDone({ id, report: { ok: 2, skipped: 0, failed: [{ path: "a", error: err("password_required") }] }, error: null });
+  const answers = ["yanlis", null];
+  const { deps } = fakeJobs([mixed, doneErr("wrong_password")], { askPassword: async () => answers.shift() });
+  const s = await runJob(deps);
+  assert.equal(s.kind, "partial");
+  assert.equal(s.ok, 2);
+  assert.ok(!s.dismissed);
+  assert.equal(s.mayHaveWritten, true);
+});
+
+test("İptal before any progress may not have written; after progress it may have", async () => {
+  let control;
+  const early = async (h, id) => {
+    control.cancel();
+    doneErr("cancelled")(h, id);
+  };
+  const a = await runJob(fakeJobs([early], { onControl: (c) => (control = c) }).deps);
+  assert.equal(a.kind, "cancelled");
+  assert.ok(!a.dismissed, "the user asked for it mid-job: the dialog says so");
+  assert.equal(a.mayHaveWritten, false);
+
+  const late = async (h, id) => {
+    h.onProgress({ id, current: "a", doneBytes: 1, totalBytes: 5 });
+    control.cancel();
+    doneErr("cancelled")(h, id);
+  };
+  const b = await runJob(fakeJobs([late], { onControl: (c) => (control = c) }).deps);
+  assert.equal(b.mayHaveWritten, true);
+});
+
+test("a finished report counts as maybe written only when something came out", async () => {
+  assert.equal(summarizeReport({ ok: 1, skipped: 0, failed: [] }).mayHaveWritten, true);
+  assert.equal(summarizeReport({ ok: 0, skipped: 1, failed: [] }).mayHaveWritten, false);
+});
+
+test("safeName covers every invisible character, and the source spells them as escapes", () => {
+  for (const c of ["\u0000", "\u001f", "\u007f", "\u009f", "\u061C", "\u200E", "\u200F", "\u202A", "\u202E", "\u2066", "\u2069"]) {
+    assert.equal(safeName(`a${c}b`), "a\uFFFDb");
+  }
+  const src = readFileSync(new URL("../src/lib/flows.ts", import.meta.url), "utf8");
+  const invisible = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFFFD]/;
+  assert.ok(!invisible.test(src), "flows.ts holds a raw invisible character");
+});
+
+test("safeText keeps line breaks and tabs, and still marks the rest", () => {
+  assert.equal(safeText("bir\nki\tuc\r\nx"), "bir\nki\tuc\r\nx");
+  assert.equal(safeText("a\u202Eb\u0000c"), "a\uFFFDb\uFFFDc");
+});
+
+test("describeOpenFailures shows sanitized names", () => {
+  assert.equal(describeOpenFailures([{ name: "a\u202Etxt.sh", code: "corrupt" }]).name, "a\uFFFDtxt.sh");
+  assert.equal(
+    describeOpenFailures([{ name: "a\u202Eb", code: "corrupt" }, { name: "c", code: "corrupt" }]).names,
+    "a\uFFFDb, c",
+  );
+});
+
+/** The sequence `local.svelte.ts` keeps: each navigation takes the next number. */
+function navSeq() {
+  let latest = 0;
+  return { current: () => latest, take: () => ++latest };
+}
+
+test("goUp shows the parent and takes a number for it", async () => {
+  const seq = navSeq();
+  const shown = [];
+  await goUpFlow("/a/b", seq, {
+    parent: async () => "/a",
+    show: async (mine, parent, cameFrom) => void shown.push([mine, parent, cameFrom]),
+    fail: () => assert.fail("no failure expected"),
+  });
+  assert.deepEqual(shown, [[1, "/a", "/a/b"]]);
+});
+
+test("goUp with no parent takes no number, so a navigation in flight survives", async () => {
+  const seq = navSeq();
+  const inFlight = seq.take();
+  await goUpFlow("/", seq, {
+    parent: async () => null,
+    show: async () => assert.fail("nowhere to go"),
+    fail: () => assert.fail("no failure expected"),
+  });
+  assert.equal(seq.current(), inFlight);
+});
+
+test("goUp gives way to a navigation that started while it waited", async () => {
+  const seq = navSeq();
+  await goUpFlow("/a/b", seq, {
+    parent: async () => {
+      seq.take();
+      return "/a";
+    },
+    show: async () => assert.fail("a newer navigation owns the pane"),
+    fail: () => assert.fail("no failure expected"),
+  });
+  assert.equal(seq.current(), 1);
+});
+
+test("goUp reports a failed lookup, unless a newer navigation took over", async () => {
+  const seq = navSeq();
+  const fails = [];
+  const deps = (later) => ({
+    parent: async () => {
+      if (later) seq.take();
+      throw err("io", "x");
+    },
+    show: async () => assert.fail("no parent"),
+    fail: (e) => fails.push(e.code),
+  });
+  await goUpFlow("/a", seq, deps(false));
+  assert.deepEqual(fails, ["io"]);
+  await goUpFlow("/a", seq, deps(true));
+  assert.deepEqual(fails, ["io"]);
 });

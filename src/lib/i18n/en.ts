@@ -152,7 +152,6 @@ export const en: Record<string, string> = {
   "result.details": "Details",
   "result.noDetails": "No further details.",
   "info.title": "Archive information",
-  "info.path": "Location",
   "drop.notArchive": "Could not open {n} files: {names}. {message}",
   "drop.notArchives": "{n} items are not supported archives: {names}.",
   "drop.mixed": "Could not open {n} files: {names}.",

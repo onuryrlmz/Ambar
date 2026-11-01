@@ -42,6 +42,7 @@ async function job(
 
 async function runExtract(path: string, req: ExtractRequest): Promise<void> {
   const summary = await job("extract", path, (id, password) => startExtract(id, path, password, req));
+  if (summary.dismissed) return;
   // Even a failed or cancelled run may have written files.
   if (pathsEqual(req.dest, localView().cwd)) void refreshLocal();
   await showResult("extract", baseName(path), summary);
@@ -74,11 +75,11 @@ export async function extractDragged(tab: Tab, dest: string): Promise<void> {
 /** Sına. */
 export async function testArchive(tab: Tab): Promise<void> {
   const summary = await job("test", tab.path, (id, password) => startTest(id, tab.path, password));
-  await showResult("test", baseName(tab.path), summary);
+  if (!summary.dismissed) await showResult("test", baseName(tab.path), summary);
 }
 
 function openFailed(name: string, error: JobSummary["error"]) {
-  return showResult("open", name, { kind: "failed", ok: 0, skipped: 0, failures: [], error });
+  return showResult("open", name, { kind: "failed", ok: 0, skipped: 0, failures: [], error, mayHaveWritten: false });
 }
 
 /** Göster, double-click, and Space on the Mac (`quickLook`). */

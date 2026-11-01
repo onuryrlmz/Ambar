@@ -12,9 +12,10 @@ use unicode_normalization::UnicodeNormalization;
 #[derive(Debug, PartialEq, Eq)]
 pub enum PlanOutcome {
     Write(PathBuf),
-    /// The user's policy or answer left the existing file alone. Counts as skipped.
+    /// A file that is not written: the policy or the user's answer left the existing one
+    /// alone, or it has no place in the output. Counts as skipped, so it is never lost silently.
     Skip,
-    /// This entry has no output of its own: the base folder, or a folder when flattening.
+    /// A folder with no output of its own: the base folder, or any folder when flattening.
     Nothing,
 }
 
@@ -175,7 +176,7 @@ pub fn plan_entry(
     ctl: &mut dyn JobCtl,
 ) -> Result<PlanOutcome, ArchiveError> {
     let Some(rel) = output_rel(&entry.path, req) else {
-        return Ok(PlanOutcome::Nothing);
+        return Ok(if entry.is_dir { PlanOutcome::Nothing } else { PlanOutcome::Skip });
     };
     if entry.is_dir && !req.keep_paths {
         return Ok(PlanOutcome::Nothing);

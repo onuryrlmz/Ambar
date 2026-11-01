@@ -1,7 +1,7 @@
 <script lang="ts">
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { listLocal } from "../api.ts";
-  import { toArchiveError, type ExtractScope } from "../flows.ts";
+  import { safeName, toArchiveError, type ExtractScope } from "../flows.ts";
   import { errorText, t } from "../i18n/index.ts";
   import { baseName } from "../tabs-core.ts";
   import type { OverwritePolicy } from "../types.ts";
@@ -30,7 +30,7 @@
   let destError = $state<string | null>(null);
   let checking = $state(false);
 
-  const folderName = $derived(baseName(cwd));
+  const folderName = $derived(safeName(baseName(cwd)));
   const policies: { value: OverwritePolicy; key: string }[] = [
     { value: "ask", key: "extract.ask" },
     { value: "overwrite", key: "extract.overwriteAll" },
@@ -39,10 +39,14 @@
   ];
 
   async function choose() {
-    const picked = await openDialog({ directory: true, multiple: false, defaultPath: dest.trim() || undefined });
-    if (typeof picked === "string") {
-      dest = picked;
-      destError = null;
+    try {
+      const picked = await openDialog({ directory: true, multiple: false, defaultPath: dest.trim() || undefined });
+      if (typeof picked === "string") {
+        dest = picked;
+        destError = null;
+      }
+    } catch (e) {
+      destError = t("extract.destBad", { message: errorText(toArchiveError(e).code) });
     }
   }
 

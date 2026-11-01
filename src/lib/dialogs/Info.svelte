@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { safeName, safeText } from "../flows.ts";
   import { formatBytes } from "../format.ts";
   import { t } from "../i18n/index.ts";
   import type { ArchiveInfo } from "../types.ts";
@@ -20,7 +21,7 @@
 </script>
 
 <Modal title={t("info.title")} icon="info" width={460} onEscape={onDone} onEnter={onDone}>
-  <div class="path">{path}</div>
+  <div class="path">{safeName(path)}</div>
   <dl>
     {#each rows as [label, value] (label)}
       <dt>{label}</dt>
@@ -29,7 +30,7 @@
   </dl>
   {#if info.comment}
     <div class="caption">{t("info.comment")}</div>
-    <div class="comment">{info.comment}</div>
+    <div class="comment">{safeText(info.comment)}</div>
   {/if}
   {#snippet footer()}
     <button class="btn primary" data-autofocus onclick={onDone}>{t("common.ok")}</button>

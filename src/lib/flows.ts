@@ -52,18 +52,22 @@ export interface JobSummary {
   failures: FileFailure[];
   /** The job-level error, when it never produced a report. */
   error: ArchiveError | null;
+  /** Files of this job may be in the destination, whatever `kind` says. */
+  mayHaveWritten: boolean;
+  /** The user closed a password prompt and nothing came of the job: no result to show. */
+  dismissed?: boolean;
 }
 
 /** Any failure rules out `ok`: a failed operation is never reported as success. */
 export function summarizeReport(report: OpReport): JobSummary {
   const failures = report.failed;
   const kind = failures.length === 0 ? "ok" : report.ok === 0 ? "failed" : "partial";
-  return { kind, ok: report.ok, skipped: report.skipped, failures, error: null };
+  return { kind, ok: report.ok, skipped: report.skipped, failures, error: null, mayHaveWritten: report.ok > 0 };
 }
 
 export function summarizeDone(done: Pick<DoneEvent, "report" | "error">): JobSummary {
   if (done.report) return summarizeReport(done.report);
-  const nothing = { ok: 0, skipped: 0, failures: [] };
+  const nothing = { ok: 0, skipped: 0, failures: [], mayHaveWritten: false };
   if (done.error?.code === "cancelled") return { kind: "cancelled", ...nothing, error: null };
   return { kind: "failed", ...nothing, error: done.error ?? { code: "io", detail: "" } };
 }
@@ -98,6 +102,9 @@ export async function runJob(deps: JobDeps): Promise<JobSummary> {
   let applyAll: ConflictChoice | null = null;
   let cancelled = false;
   let currentId: string | null = null;
+  let progressed = false;
+  // The last run that got files out, before a re-run for a password.
+  let gotOut: OpReport | null = null;
 
   const sendCancel = () => {
     if (currentId !== null) void deps.cancel(currentId).catch(() => {});
@@ -135,7 +142,10 @@ export async function runJob(deps: JobDeps): Promise<JobSummary> {
       let unwatch = () => {};
       deps
         .watch(id, {
-          onProgress: (ev) => deps.onProgress?.(ev),
+          onProgress: (ev) => {
+            progressed = true;
+            deps.onProgress?.(ev);
+          },
           onConflict: (ev) => void conflict(id, ev.path),
           onDone: resolve,
         })
@@ -154,15 +164,19 @@ export async function runJob(deps: JobDeps): Promise<JobSummary> {
     });
 
   for (;;) {
+    progressed = false;
     const done = await once(password);
+    if (done.report && done.report.ok > 0) gotOut = done.report;
     const code = done.error?.code ?? done.report?.failed.find((f) => isPasswordCode(f.error.code))?.error.code;
-    if (code === undefined || !isPasswordCode(code) || cancelled) return summarizeDone(done);
+    if (code === undefined || !isPasswordCode(code) || cancelled) {
+      const summary = summarizeDone(done);
+      return { ...summary, mayHaveWritten: summary.mayHaveWritten || progressed || gotOut !== null };
+    }
     password = await deps.askPassword(password !== null || code === "wrong_password");
     if (password === null) {
-      // What the last run did get out still has to be reported.
-      return done.report && done.report.ok > 0 ? summarizeDone(done) : summarizeDone({
-        report: null, error: { code: "cancelled", detail: "" },
-      });
+      // What an earlier run did get out still has to be reported.
+      if (gotOut) return summarizeReport(gotOut);
+      return { ...summarizeDone({ report: null, error: { code: "cancelled", detail: "" } }), dismissed: true };
     }
   }
 }
@@ -245,10 +259,15 @@ export function progressView(ev: ProgressEvent | null): {
   return { current: ev.current, done: ev.doneBytes, total: ev.totalBytes, percent };
 }
 
-const UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/g;
+const UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+const UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 /** A name from an archive is untrusted: a bidi override can make `x.sh` read as a text file. */
-export const safeName = (name: string): string => name.replace(UNSAFE_NAME, "�");
+export const safeName = (name: string): string => name.replace(UNSAFE_NAME, "\uFFFD");
+
+/** For several lines of untrusted text, such as an archive comment: line breaks and tabs stay. */
+export const safeText = (text: string): string => text.replace(UNSAFE_TEXT, "\uFFFD");
 
 const trimSeparators = (p: string) => (/^[\\/]+$/.test(p) ? p : p.replace(/[\\/]+$/, ""));
 
@@ -268,9 +287,34 @@ const NAMES_SHOWN = 4;
 /** One banner, however many files a drop or a multi-open could not open. */
 export function describeOpenFailures(list: OpenFailure[]): OpenFailureText | null {
   if (list.length === 0) return null;
-  if (list.length === 1) return { kind: "one", name: list[0].name, code: list[0].code };
-  const shown = list.slice(0, NAMES_SHOWN).map((f) => f.name);
+  if (list.length === 1) return { kind: "one", name: safeName(list[0].name), code: list[0].code };
+  const shown = list.slice(0, NAMES_SHOWN).map((f) => safeName(f.name));
   if (list.length > NAMES_SHOWN) shown.push("…");
   const same = list.every((f) => f.code === list[0].code);
   return { kind: "many", n: list.length, names: shown.join(", "), code: same ? list[0].code : null };
+}
+
+/**
+ * Up one folder. Only a real move takes a navigation number: a root has no parent, and
+ * that must not outrank a navigation in flight. A navigation that started during the
+ * lookup wins over it, success or failure.
+ */
+export async function goUpFlow(
+  here: string,
+  seq: { current: () => number; take: () => number },
+  deps: {
+    parent: (path: string) => Promise<string | null>;
+    show: (mine: number, parent: string, cameFrom: string) => Promise<void>;
+    fail: (error: ArchiveError) => void;
+  },
+): Promise<void> {
+  const seen = seq.current();
+  let parent: string | null;
+  try {
+    parent = await deps.parent(here);
+  } catch (e) {
+    if (seen === seq.current()) deps.fail(toArchiveError(e));
+    return;
+  }
+  if (parent !== null && seen === seq.current()) await deps.show(seq.take(), parent, here);
 }

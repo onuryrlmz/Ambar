@@ -17,6 +17,8 @@ pub struct Entry {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
+    /// Compressed bytes across all volumes. `None` for a RAR folder, and where the format
+    /// has no per-entry size: 7z and the TAR family.
     pub packed: Option<u64>,
     pub modified: Option<i64>,
     pub crc: Option<u32>,

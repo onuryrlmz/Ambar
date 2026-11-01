@@ -45,6 +45,8 @@ mod ffi {
     const HOST_UNIX: c_uint = 3;
     pub const OM_LIST: c_uint = sys::RAR_OM_LIST;
     pub const OM_EXTRACT: c_uint = sys::RAR_OM_EXTRACT;
+    /// Listing that also returns the headers of a file's continuation in later volumes.
+    pub const OM_LIST_INCSPLIT: c_uint = sys::RAR_OM_LIST_INCSPLIT;
     pub const OP_SKIP: c_int = sys::RAR_SKIP;
     pub const OP_TEST: c_int = sys::RAR_TEST;
     pub const OP_EXTRACT: c_int = sys::RAR_EXTRACT;
@@ -64,6 +66,10 @@ mod ffi {
         pub is_dir: bool,
         pub encrypted: bool,
         pub unpacked_size: u64,
+        /// Bytes of this header's part: one volume's worth for a split file.
+        pub packed_size: u64,
+        /// Continues a file from the previous volume.
+        pub split_before: bool,
         pub crc: u32,
         pub attr: u32,
         pub host_unix: bool,
@@ -315,6 +321,7 @@ mod ffi {
             // Packed struct: copy scalars out by value, never take references.
             let flags = hd.flags;
             let (lo, hi) = (hd.unp_size, hd.unp_size_high);
+            let (plo, phi) = (hd.pack_size, hd.pack_size_high);
             let (ml, mh) = (hd.mtime_low, hd.mtime_high);
             let win = ((mh as u64) << 32) | ml as u64;
             // SAFETY: `filename_w` is a NUL-terminated array inside the struct.
@@ -325,6 +332,8 @@ mod ffi {
                 is_dir: flags & sys::RHDF_DIRECTORY != 0,
                 encrypted: flags & sys::RHDF_ENCRYPTED != 0,
                 unpacked_size: ((hi as u64) << 32) | lo as u64,
+                packed_size: ((phi as u64) << 32) | plo as u64,
+                split_before: flags & sys::RHDF_SPLITBEFORE != 0,
                 crc: hd.file_crc,
                 attr: hd.file_attr,
                 host_unix: hd.host_os == HOST_UNIX,
@@ -682,10 +691,10 @@ impl RarEngine {
     }
 
     fn list_inner(&self, pw: Option<&Password>) -> Result<(ArchiveInfo, Vec<Entry>), ArchiveError> {
-        let mut ar = self.open(ffi::OM_LIST, pw, false, false)?;
+        let mut ar = self.open(ffi::OM_LIST_INCSPLIT, pw, false, false)?;
         if ar.flags.has_comment {
             // Only archives with plain headers can have a readable comment here.
-            ar = self.open(ffi::OM_LIST, pw, false, true)?;
+            ar = self.open(ffi::OM_LIST_INCSPLIT, pw, false, true)?;
         }
         let info = ArchiveInfo {
             format: Format::Rar,
@@ -703,7 +712,16 @@ impl RarEngine {
         };
         let mut entries = vec![];
         while let Some(h) = ar.read_header().map_err(|f| self.map_err(f))? {
-            entries.push(to_entry(&h));
+            let e = to_entry(&h);
+            if h.split_before {
+                // Another volume's part of the file before it, not a row of its own. With
+                // the set opened at a later volume, the file's start is not there to add to.
+                if let Some(start) = entries.last_mut().filter(|s: &&mut Entry| s.path == e.path) {
+                    start.packed = start.packed.map(|p| p.saturating_add(h.packed_size));
+                }
+            } else {
+                entries.push(e);
+            }
             ar.process(ffi::OP_SKIP, None, None)
                 .map_err(|f| self.map_err(f))?;
         }
@@ -718,7 +736,7 @@ fn to_entry(h: &Header) -> Entry {
             .to_string(),
         is_dir: h.is_dir,
         size: if h.is_dir { 0 } else { h.unpacked_size },
-        packed: None,
+        packed: (!h.is_dir).then_some(h.packed_size),
         modified: h.mtime,
         // RAR5 stores a keyed hash instead of the CRC for encrypted files.
         crc: (!h.is_dir && !h.encrypted).then_some(h.crc),
@@ -915,7 +933,34 @@ mod tests {
         // make-fixtures.sh sets every mtime to 2020-01-02 03:04:05 UTC.
         assert_eq!(get("kok.txt").modified, Some(1_577_934_245));
         assert!(get("kok.txt").crc.is_some());
-        assert!(get("kok.txt").packed.is_none());
+        // Stored or compressed, a 4-byte file takes up something; a folder has no data.
+        assert!(get("kok.txt").packed.is_some_and(|p| p > 0));
+        assert_eq!(get("belgeler").packed, None);
+    }
+
+    #[test]
+    fn listing_a_set_with_its_last_volume_gone_says_so() {
+        let src = tempfile::tempdir().unwrap();
+        let only = src.path().join("multi.part1.rar");
+        std::fs::copy(fixture("multi.part1.rar"), &only).unwrap();
+        match RarEngine::new(&only).list(None) {
+            Err(ArchiveError::MissingVolume(n)) => assert_eq!(n, "multi.part2.rar"),
+            other => panic!("{:?}", other.map(|(_, e)| e.len())),
+        }
+    }
+
+    #[test]
+    fn packed_size_of_a_split_entry_adds_up_its_volumes() {
+        let entries = list_plain("multi.part1.rar");
+        let big: Vec<&Entry> = entries.iter().filter(|e| e.path == "buyuk.bin").collect();
+        assert_eq!(big.len(), 1, "one row, however many volumes it spans");
+        assert_eq!(big[0].size, 20480);
+        // Random bytes do not compress, and neither volume alone can hold them.
+        let part1 = std::fs::metadata(fixture("multi.part1.rar")).unwrap().len();
+        let packed = big[0].packed.unwrap();
+        assert!(packed > part1, "only the first volume was counted: {packed}");
+        assert!((20480..21000).contains(&packed), "{packed}");
+        assert!(entries.iter().any(|e| e.path == "kok.txt" && e.packed.is_some()));
     }
 
     #[test]

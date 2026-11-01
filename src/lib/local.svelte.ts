@@ -1,6 +1,7 @@
 // The left pane's folder. Module state, so it survives the page's `{#key lang}` re-render.
 
 import { homeDir, listLocal, parentDir, toArchiveError } from "./api.ts";
+import { goUpFlow } from "./flows.ts";
 import { sortNodes } from "./sort.ts";
 import * as core from "./tabs-core.ts";
 import type { LocalEntry, SortKey, TreeNode } from "./types.ts";
@@ -72,14 +73,17 @@ export async function goHome(): Promise<void> {
 export async function goUp(): Promise<void> {
   const here = view.cwd;
   if (!here) return;
-  // At the root there is nowhere to go, and that must not outrank a navigation in flight.
-  const seen = latest;
-  try {
-    const parent = await parentDir(here);
-    if (seen === latest && parent !== null) await show(++latest, parent, here);
-  } catch (e) {
-    if (seen === latest) listError = { path: here, code: toArchiveError(e).code };
-  }
+  await goUpFlow(
+    here,
+    { current: () => latest, take: () => ++latest },
+    {
+      parent: parentDir,
+      show: (mine, parent, cameFrom) => show(mine, parent, cameFrom),
+      fail: (error) => {
+        listError = { path: here, code: error.code };
+      },
+    },
+  );
 }
 
 export const refreshLocal = () => (view.cwd ? goTo(view.cwd) : goHome());

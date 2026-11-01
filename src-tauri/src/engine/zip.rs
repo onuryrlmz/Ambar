@@ -366,6 +366,28 @@ mod tests {
         w.finish().unwrap();
     }
 
+    #[test]
+    fn a_file_named_like_the_base_folder_is_reported_as_skipped_never_lost() {
+        let d = tempfile::tempdir().unwrap();
+        let z = d.path().join("a.zip");
+        let mut w = ZipWriter::new(File::create(&z).unwrap());
+        w.start_file("a", stored()).unwrap();
+        w.write_all(b"dosya").unwrap();
+        w.add_directory("a/", stored()).unwrap();
+        w.start_file("a/ic.txt", stored()).unwrap();
+        w.write_all(b"ic").unwrap();
+        w.finish().unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let mut r = req(dest.path());
+        r.selection = vec!["a".into()];
+        r.base = "a".into();
+        let rep = ZipEngine::new(&z).extract(None, &r, &mut ctl()).unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+        assert_eq!(rep.skipped, 1, "file `a` has no output here and must be counted");
+        assert_eq!(std::fs::read(dest.path().join("ic.txt")).unwrap(), b"ic");
+    }
+
     fn patch_all(bytes: &mut [u8], from: &[u8], to: &[u8]) {
         let mut i = 0;
         let mut hits = 0;

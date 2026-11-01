@@ -152,7 +152,6 @@ export const tr: Record<string, string> = {
   "result.details": "Ayrıntılar",
   "result.noDetails": "Başka ayrıntı yok.",
   "info.title": "Arşiv bilgisi",
-  "info.path": "Konum",
   "drop.notArchive": "{n} dosya açılamadı: {names}. {message}",
   "drop.notArchives": "{n} öğe desteklenen bir arşiv değil: {names}.",
   "drop.mixed": "{n} dosya açılamadı: {names}.",
