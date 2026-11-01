@@ -549,9 +549,9 @@ test("safeName covers every invisible character, and the source spells them as e
   for (const c of ["\u0000", "\u001f", "\u007f", "\u009f", "\u061C", "\u200E", "\u200F", "\u202A", "\u202E", "\u2066", "\u2069"]) {
     assert.equal(safeName(`a${c}b`), "a\uFFFDb");
   }
-  const src = readFileSync(new URL("../src/lib/flows.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/lib/names.ts", import.meta.url), "utf8");
   const invisible = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFFFD]/;
-  assert.ok(!invisible.test(src), "flows.ts holds a raw invisible character");
+  assert.ok(!invisible.test(src), "names.ts holds a raw invisible character");
 });
 
 test("safeText keeps line breaks and tabs, and still marks the rest", () => {

@@ -17,6 +17,7 @@
   import { tick, untrack, type Snippet } from "svelte";
   import { t } from "./i18n/index.ts";
   import Icon from "./Icon.svelte";
+  import { safeName } from "./names.ts";
   import * as core from "./tabs-core.ts";
   import type { SortDir, SortKey } from "./types.ts";
   import VirtualList from "./VirtualList.svelte";
@@ -255,11 +256,11 @@
             onmouseup={(e) => e.button === 0 && release(i)}
             ondblclick={(e) => e.button === 0 && onOpen(r)}
           >
-            <div class="cell name" title={r.name}>
+            <div class="cell name" title={safeName(r.name)}>
               <span class="kind" class:folder={r.isDir} class:crate={!r.isDir && core.isArchiveName(r.name)}>
                 <Icon name={r.isDir ? "folder" : core.isArchiveName(r.name) ? "archive" : "file"} />
               </span>
-              <span class="text">{r.name}</span>
+              <span class="text">{safeName(r.name)}</span>
               {@render nameAfter?.(r)}
             </div>
             {#each shown as c (c.key)}

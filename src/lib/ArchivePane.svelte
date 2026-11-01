@@ -6,8 +6,9 @@
   import { formatBytes, formatCrc, formatDate, formatRatio } from "./format.ts";
   import { errorText, t } from "./i18n/index.ts";
   import Icon from "./Icon.svelte";
+  import { safeName } from "./names.ts";
   import { activeModel, activeTab, allTabs, archiveError, closeTab, dismissArchiveError, focusTab, updateActive } from "./tabs.svelte.ts";
-  import { archiveCrumbs, baseName, navigate, parentOf, toggleSort, type PaneView } from "./tabs-core.ts";
+  import { archiveCrumbs, navigate, parentOf, tabLabel, toggleSort, type PaneView } from "./tabs-core.ts";
   import type { TreeNode } from "./types.ts";
 
   let {
@@ -99,7 +100,7 @@
         role="tab"
         tabindex="-1"
         aria-selected={x.id === tab?.id}
-        title={x.path}
+        title={safeName(x.path)}
         onmousedown={(e) => {
           if (e.button === 0) {
             onActivate();
@@ -113,7 +114,7 @@
         {:else}
           <span class="glyph"><Icon name={x.locked ? "lock" : "archive"} size={14} /></span>
         {/if}
-        <span class="label">{baseName(x.path)}</span>
+        <span class="label">{tabLabel(x.path)}</span>
         <button
           class="nav-btn tab-close"
           title={t("archive.closeTab")}
@@ -138,12 +139,12 @@
           <button
             class="seg root"
             class:here={tab.cwd === ""}
-            title={tab.path}
+            title={safeName(tab.path)}
             tabindex="-1"
             onclick={() => jump("")}
           >
             <span class="glyph"><Icon name="archive" size={13} /></span>
-            <span class="root-name">{baseName(tab.path)}</span>
+            <span class="root-name">{tabLabel(tab.path)}</span>
           </button>
         {/snippet}
       </Crumbs>

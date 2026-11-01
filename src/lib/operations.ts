@@ -1,14 +1,14 @@
 // The flows, connected to the real backend, the dialogs and the panes.
 
 import {
-  answerConflict, cancelJob, newJobId, openEntry, openLocal, startExtract, startTest, watchJob,
+  answerConflict, cancelJob, newJobId, openEntry, openLocal, quickLookLocal, startExtract, startTest, watchJob,
 } from "./api.ts";
 import {
   askConflict, askExtract, askPassword, beginProgress, confirmRisky, endProgress, setProgressControl,
   setProgressEvent, showResult, type ProgressState,
 } from "./dialogs/store.svelte.ts";
 import {
-  extractTarget, openEntryWithPrompts, openLocalWithPrompt, pathsEqual, runJob, safeName, type JobSummary,
+  extractTarget, openEntryWithPrompts, openLocalWithPrompt, pathsEqual, runJob, safeName, toArchiveError, type JobSummary,
   type OpenFailure,
 } from "./flows.ts";
 import { localView, refreshLocal } from "./local.svelte.ts";
@@ -125,4 +125,14 @@ export async function openLocalFile(path: string): Promise<boolean> {
   });
   if (outcome.kind === "failed") setOpenFailures([{ name, code: outcome.error.code }]);
   return false;
+}
+
+/** Space on a local file on the Mac. */
+export async function previewLocalFile(path: string): Promise<void> {
+  setOpenFailures([]);
+  try {
+    await quickLookLocal(path);
+  } catch (e) {
+    setOpenFailures([{ name: baseName(path), code: toArchiveError(e).code }]);
+  }
 }

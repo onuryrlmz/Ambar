@@ -91,5 +91,8 @@ export const openEntry = (
 /** Opens a local file with its default app. Rejects with `risky_open` like `openEntry`. */
 export const openLocal = (path: string, allowRisky: boolean) => invoke<void>("open_local", { path, allowRisky });
 
+/** Previews a local file with Quick Look, never launching it. macOS only. */
+export const quickLookLocal = (path: string) => invoke<void>("quick_look_local", { path });
+
 /** Rebuilds the native menu in this language. */
 export const setMenuLanguage = (lang: string) => invoke<void>("set_menu_language", { lang });

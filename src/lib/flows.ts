@@ -2,11 +2,14 @@
 // test them. Passwords live in local variables of these functions, and go nowhere but the
 // injected call: nothing here returns or stores one.
 
+import { safeName } from "./names.ts";
 import { selectedPaths } from "./tabs-core.ts";
 import type {
   ArchiveError, ConflictChoice, ConflictEvent, DoneEvent, FileFailure, OpenResult, OpReport,
   ProgressEvent,
 } from "./types.ts";
+
+export { safeName, safeText } from "./names.ts";
 
 /** Errors reject with `{ code, detail }`; anything else becomes a generic `io` error. */
 export function toArchiveError(e: unknown): ArchiveError {
@@ -258,16 +261,6 @@ export function progressView(ev: ProgressEvent | null): {
   const percent = ev.totalBytes > 0 ? Math.min(100, Math.floor((ev.doneBytes / ev.totalBytes) * 100)) : null;
   return { current: ev.current, done: ev.doneBytes, total: ev.totalBytes, percent };
 }
-
-const UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
-
-const UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-
-/** A name from an archive is untrusted: a bidi override can make `x.sh` read as a text file. */
-export const safeName = (name: string): string => name.replace(UNSAFE_NAME, "\uFFFD");
-
-/** For several lines of untrusted text, such as an archive comment: line breaks and tabs stay. */
-export const safeText = (text: string): string => text.replace(UNSAFE_TEXT, "\uFFFD");
 
 const trimSeparators = (p: string) => (/^[\\/]+$/.test(p) ? p : p.replace(/[\\/]+$/, ""));
 

@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   archiveCrumbs, baseName, beginGesture, clampSplit, closeTab, emptyTabs, fileToShow, fitColumns, focusTab, isArchiveName, isCloseTabKey, isReloadKey,
-  keyCommand, listModel, localCrumbs, moveGesture, moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pressRow,
+  keyCommand, listModel, localCrumbs, tabLabel, moveGesture, moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pressRow,
   pruneSelection, releaseGesture, rowKey, selectAll, selectClick, selectedPaths, selectionSummary, toggleCursor, toggleSort, updateTab,
 } from "../src/lib/tabs-core.ts";
 
@@ -354,4 +355,28 @@ test("fileToShow: the one selected file, or the cursor's file when nothing is se
   assert.equal(fileToShow({ ...v, selection: new Set(["d:alt"]) }, model), null);
   assert.equal(fileToShow({ ...v, selection: new Set(["f:a.txt", "f:b.txt"]) }, model), null, "two is ambiguous");
   assert.equal(fileToShow({ ...v, selection: new Set(["f:gone"]) }, model), null);
+});
+
+test("breadcrumbs and tab labels mark bidi overrides, and paths stay exact for actions", () => {
+  const spoof = "fatura\u202Etxt.command";
+  assert.deepEqual(archiveCrumbs(`a/${spoof}`), [
+    { label: "a", path: "a" },
+    { label: "fatura\uFFFDtxt.command", path: `a/${spoof}` },
+  ]);
+  assert.deepEqual(localCrumbs(`/x/${spoof}`).at(-1), { label: "fatura\uFFFDtxt.command", path: `/x/${spoof}` });
+  assert.deepEqual(localCrumbs(`C:\\${spoof}`).at(-1), { label: "fatura\uFFFDtxt.command", path: `C:\\${spoof}` });
+  assert.equal(tabLabel(`/x/${spoof}.rar`), "fatura\uFFFDtxt.command.rar");
+  assert.equal(tabLabel("/x/türkçe 😀.rar"), "türkçe 😀.rar");
+});
+
+test("the file list and the panes show names only through safeName", () => {
+  const read = (f) => readFileSync(new URL(`../src/lib/${f}`, import.meta.url), "utf8");
+  const list = read("FileList.svelte");
+  assert.ok(!/\{r\.name\}/.test(list), "FileList shows a raw row name");
+  assert.ok(/title=\{safeName\(r\.name\)\}/.test(list));
+  assert.ok(/<span class="text">\{safeName\(r\.name\)\}<\/span>/.test(list));
+  const pane = read("ArchivePane.svelte");
+  assert.ok(!/\{baseName\(/.test(pane), "ArchivePane shows a raw archive name");
+  assert.ok(!/title=\{(x|tab)\.path\}/.test(pane), "ArchivePane shows a raw archive path");
+  assert.ok(!/name: failure\.path,/.test(read("LocalPane.svelte")), "LocalPane shows a raw path");
 });

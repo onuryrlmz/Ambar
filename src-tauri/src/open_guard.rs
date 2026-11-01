@@ -62,12 +62,35 @@ pub fn check_local_open(path: &Path, allow_risky: bool) -> Result<(), ArchiveErr
     check_exec_bits(&real, allow_risky)
 }
 
-/// A file with any execute bit launches as a program, whatever its name (`mdls` calls an
-/// extensionless one `public.unix-executable`). Windows has no such bit: its list decides.
+/// Whether a local file may go to Quick Look. A preview launches nothing, so only "is this
+/// a file" matters; a risky type is fine.
+pub fn check_quick_look(path: &Path) -> Result<(), ArchiveError> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(ArchiveError::Io("not a file".into()))
+    }
+}
+
+/// Whether the OS sees no extension in this name, by the same rule as `URL.pathExtension`:
+/// a leading dot does not start one, and neither does a last part that is empty or has a space.
+#[cfg(unix)]
+fn has_no_extension(name: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => stem.is_empty() || ext.is_empty() || ext.contains(' '),
+        None => true,
+    }
+}
+
+/// An extensionless file with any execute bit launches as a program (macOS calls it
+/// `public.unix-executable`). One with an extension opens in that type's app, and the risky
+/// list judges it: exFAT, NTFS and SMB report every file as executable, so a bit proves
+/// nothing there. Windows has no such bit: its list decides.
 #[cfg(unix)]
 fn check_exec_bits(real: &Path, allow_risky: bool) -> Result<(), ArchiveError> {
     use std::os::unix::fs::PermissionsExt;
-    if !allow_risky && std::fs::metadata(real)?.permissions().mode() & 0o111 != 0 {
+    let extensionless = has_no_extension(&real.file_name().unwrap_or_default().to_string_lossy());
+    if extensionless && !allow_risky && std::fs::metadata(real)?.permissions().mode() & 0o111 != 0 {
         return Err(ArchiveError::RiskyOpen("executable".into()));
     }
     Ok(())
@@ -193,28 +216,68 @@ mod tests {
         check_local_open(&risky, true).unwrap();
     }
 
+    /// The names here are what macOS itself calls `public.unix-executable` with an exec bit.
     #[cfg(unix)]
     #[test]
-    fn local_open_treats_any_exec_bit_as_risky_whatever_the_name() {
+    fn local_open_treats_an_exec_bit_as_risky_only_without_an_extension() {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
-        for name in ["tool", "belge.txt"] {
+        for name in ["tool", ".gizli", "a.", "a.b c", "tool "] {
             let f = d.path().join(name);
             std::fs::write(&f, b"x").unwrap();
             for mode in [0o755, 0o744, 0o654, 0o645] {
                 std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
-                assert!(matches!(check_local_open(&f, false), Err(ArchiveError::RiskyOpen(_))), "{name} {mode:o}");
+                assert!(matches!(check_local_open(&f, false), Err(ArchiveError::RiskyOpen(_))), "{name:?} {mode:o}");
                 check_local_open(&f, true).unwrap();
             }
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
             check_local_open(&f, false).unwrap();
         }
-        // The target's bits count, not the link's.
+    }
+
+    /// exFAT, NTFS and SMB report every file as executable, so a bit alone must not ask.
+    #[cfg(unix)]
+    #[test]
+    fn local_open_ignores_the_exec_bit_on_a_file_with_an_extension() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        for name in ["belge.txt", "resim.JPG", "a.xyzq", ".gizli.txt"] {
+            let f = d.path().join(name);
+            std::fs::write(&f, b"x").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            check_local_open(&f, false).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_open_judges_the_exec_bit_by_the_target_of_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
         let tool = d.path().join("tool");
+        std::fs::write(&tool, b"x").unwrap();
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let link = d.path().join("masum");
+        let link = d.path().join("masum.txt");
         std::os::unix::fs::symlink(&tool, &link).unwrap();
         assert!(matches!(check_local_open(&link, false), Err(ArchiveError::RiskyOpen(_))));
+        // The other way round: the link has no extension, its target has one.
+        let doc = d.path().join("belge.txt");
+        std::fs::write(&doc, b"x").unwrap();
+        std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = d.path().join("masum");
+        std::os::unix::fs::symlink(&doc, &link).unwrap();
+        check_local_open(&link, false).unwrap();
+    }
+
+    #[test]
+    fn quick_look_takes_any_file_but_not_a_folder_or_a_missing_one() {
+        let d = tempfile::tempdir().unwrap();
+        // A preview launches nothing, so the risky list does not apply.
+        let risky = d.path().join("kur.command");
+        std::fs::write(&risky, b"x").unwrap();
+        check_quick_look(&risky).unwrap();
+        assert!(matches!(check_quick_look(d.path()), Err(ArchiveError::Io(_))));
+        assert!(matches!(check_quick_look(&d.path().join("yok.txt")), Err(ArchiveError::Io(_))));
     }
 
     #[cfg(unix)]

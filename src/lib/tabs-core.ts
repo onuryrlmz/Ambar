@@ -2,6 +2,7 @@
 // objects and never mutates: `tabs.svelte.ts` and `local.svelte.ts` hold the result in
 // `$state.raw`, because a deep proxy over a 100,000-entry index would be far too slow.
 
+import { safeName } from "./names.ts";
 import { buildIndex, type ArchiveIndex } from "./tree.ts";
 import type { ArchiveInfo, OpenResult, SortDir, SortKey, TreeNode } from "./types.ts";
 
@@ -264,7 +265,10 @@ export function toggleSort<V extends SortState>(v: V, key: SortKey): V {
     : { ...v, sortKey: key, sortDir: "asc" };
 }
 
-/** A breadcrumb segment; `path` is null on the "…" that stands in for hidden segments. */
+/**
+ * A breadcrumb segment; `path` is null on the "…" that stands in for hidden segments.
+ * `label` is for display, with invisible characters marked; `path` is the exact one.
+ */
 export interface Crumb {
   label: string;
   path: string | null;
@@ -284,7 +288,7 @@ export function archiveCrumbs(cwd: string): Crumb[] {
   for (;;) {
     const end = cwd.indexOf("/", at);
     const stop = end < 0 ? cwd.length : end;
-    out.push({ label: cwd.slice(at, stop), path: cwd.slice(0, stop) });
+    out.push({ label: safeName(cwd.slice(at, stop)), path: cwd.slice(0, stop) });
     if (end < 0) return capCrumbs(out);
     at = end + 1;
   }
@@ -299,7 +303,7 @@ export function localCrumbs(path: string): Crumb[] {
     for (const part of path.split("/")) {
       if (!part) continue;
       cur += "/" + part;
-      out.push({ label: part, path: cur });
+      out.push({ label: safeName(part), path: cur });
     }
     return capCrumbs(out);
   }
@@ -309,7 +313,7 @@ export function localCrumbs(path: string): Crumb[] {
     if (!part) continue;
     if (cur === "") cur = unc ? "\\\\" + part : part + "\\";
     else cur += (cur.endsWith("\\") ? "" : "\\") + part;
-    out.push({ label: part, path: cur });
+    out.push({ label: safeName(part), path: cur });
   }
   return capCrumbs(out);
 }
@@ -319,6 +323,9 @@ export function baseName(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
 }
+
+/** An archive's name as a tab shows it. */
+export const tabLabel = (path: string): string => safeName(baseName(path));
 
 const ARCHIVE_NAME = /\.(rar|zip|7z|tar|tgz|tbz2?|txz|gz|bz2|xz)$/i;
 

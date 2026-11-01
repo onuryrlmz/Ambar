@@ -273,6 +273,20 @@ pub async fn open_local(app: AppHandle, path: String, allow_risky: bool) -> Resu
     .await
 }
 
+/// Space on a local file on the Mac: previews it, and never launches it.
+#[tauri::command]
+pub async fn quick_look_local(path: String) -> Result<(), ArchiveError> {
+    blocking(move || {
+        let path = Path::new(&path);
+        open_guard::check_quick_look(path)?;
+        #[cfg(target_os = "macos")]
+        return quick_look(path);
+        #[cfg(not(target_os = "macos"))]
+        Err(ArchiveError::Unsupported("quick look".into()))
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

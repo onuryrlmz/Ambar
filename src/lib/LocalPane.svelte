@@ -9,6 +9,7 @@
     dismissLocalError, goHome, goTo, goUp, localError, localModel, localSort, localView,
     refreshLocal, setLocalView, startLocal, toggleLocalSort, type LocalRow,
   } from "./local.svelte.ts";
+  import { safeName } from "./names.ts";
   import { localCrumbs } from "./tabs-core.ts";
 
   let {
@@ -112,7 +113,7 @@
   {#if failure}
     <div class="banner" role="alert">
       <Icon name="alert" size={14} />
-      <span class="message">{failure.path === null ? errorText(failure.code) : t("pane.listFailed", { name: failure.path, message: errorText(failure.code) })}</span>
+      <span class="message">{failure.path === null ? errorText(failure.code) : t("pane.listFailed", { name: safeName(failure.path), message: errorText(failure.code) })}</span>
       <button class="nav-btn" title={t("common.close")} tabindex="-1" onclick={dismissLocalError}><Icon name="close" size={12} /></button>
     </div>
   {/if}

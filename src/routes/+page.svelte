@@ -15,7 +15,7 @@
   import Icon from "$lib/Icon.svelte";
   import { localModel, localView } from "$lib/local.svelte.ts";
   import LocalPane from "$lib/LocalPane.svelte";
-  import { extractDragged, extractWithDialog, openLocalFile, openPaths, showEntry, testArchive } from "$lib/operations.ts";
+  import { extractDragged, extractWithDialog, openLocalFile, openPaths, previewLocalFile, showEntry, testArchive } from "$lib/operations.ts";
   import StatusBar from "$lib/StatusBar.svelte";
   import { activeModel, activeTab, allTabs, closeTab } from "$lib/tabs.svelte.ts";
   import {
@@ -348,6 +348,9 @@
           active={activePane === "local"}
           onActivate={() => (activePane = "local")}
           onOpenFile={(p) => void openFromLeft(p)}
+          onQuickLook={(r) => {
+            if (!r.isDir) void previewLocalFile(r.path);
+          }}
           onDragStart={(x, y) => startItemDrag("local", x, y)}
         />
       </div>

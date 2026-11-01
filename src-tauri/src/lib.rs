@@ -53,6 +53,7 @@ pub fn run() {
             commands::parent_dir,
             commands::open_entry,
             commands::open_local,
+            commands::quick_look_local,
             menu::set_menu_language,
         ])
         .plugin(tauri_plugin_opener::init())
