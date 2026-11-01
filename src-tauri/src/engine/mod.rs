@@ -1,5 +1,6 @@
 pub mod detect;
 pub mod plan;
+pub mod rar;
 
 use crate::error::ArchiveError;
 use serde::{Deserialize, Serialize};
@@ -99,10 +100,13 @@ pub trait ArchiveEngine: Send {
     ) -> Result<OpReport, ArchiveError>;
 }
 
-/// Opens the engine for the archive at `path`. Engines are wired in later tasks.
+/// Opens the engine for the archive at `path`. Engines for the other formats are
+/// wired in later tasks.
 pub fn open_engine(path: &Path) -> Result<Box<dyn ArchiveEngine>, ArchiveError> {
-    let format = detect_format(path)?;
-    Err(ArchiveError::Unsupported(format!("{format:?}")))
+    match detect_format(path)? {
+        Format::Rar => Ok(Box::new(rar::RarEngine::new(path))),
+        format => Err(ArchiveError::Unsupported(format!("{format:?}"))),
+    }
 }
 
 /// Shared `JobCtl` test double for engine tests.
