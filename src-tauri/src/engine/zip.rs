@@ -95,8 +95,7 @@ impl ZipEngine {
         let total: u64 = metas
             .iter()
             .filter(|m| !m.entry.is_dir && !m.entry.path.is_empty() && wanted(&m.entry.path))
-            .map(|m| m.entry.size)
-            .sum();
+            .fold(0u64, |acc, m| acc.saturating_add(m.entry.size));
         let mut report = OpReport::default();
         let mut done = 0u64;
         if ar.has_duplicate_names() {

@@ -34,3 +34,7 @@ liblzma = { version = "0.4", features = ["static"] }
 [dev-dependencies]
 tempfile = "3"
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["aes256", "compress"] }
+
+[profile.release]
+# A panic on hostile archive data is caught by the job layer; never abort.
+panic = "unwind"

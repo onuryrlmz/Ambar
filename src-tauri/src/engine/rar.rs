@@ -493,8 +493,7 @@ impl RarEngine {
         let total: u64 = entries
             .iter()
             .filter(|e| !e.is_dir && wanted(&e.path))
-            .map(|e| e.size)
-            .sum();
+            .fold(0u64, |acc, e| acc.saturating_add(e.size));
         let keep_broken = req.is_some_and(|r| r.keep_broken);
 
         let mut report = OpReport::default();
