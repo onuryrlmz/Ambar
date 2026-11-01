@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatBytes, formatRatio, formatDate } from "../src/lib/format.ts";
+import { formatBytes, formatRatio, formatDate, formatCrc, formatCount } from "../src/lib/format.ts";
 
 test("formatBytes 2516582 -> 2,4 MB; 0 -> 0 B", () => {
   assert.equal(formatBytes(2516582), "2,4 MB");
@@ -25,4 +25,14 @@ test("formatDate uses ms and Turkish locale", () => {
 test("formatBytes bumps the unit when rounding reaches 1024", () => {
   assert.equal(formatBytes(1048575), "1 MB");
   assert.equal(formatBytes(1024 * 1024), "1 MB");
+});
+
+test("formatCrc is eight uppercase hex digits, em dash when absent", () => {
+  assert.equal(formatCrc(0xabc), "00000ABC");
+  assert.equal(formatCrc(0), "00000000");
+  assert.equal(formatCrc(null), "—");
+});
+
+test("formatCount groups digits by language", () => {
+  assert.equal(formatCount(100000), "100.000");
 });

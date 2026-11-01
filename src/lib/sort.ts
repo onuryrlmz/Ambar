@@ -8,7 +8,7 @@ function value(n: TreeNode, key: "packed" | "modified" | "crc" | "ratio"): numbe
 }
 
 /** Folders always come first; null values sort last in either direction. */
-export function sortNodes(nodes: TreeNode[], key: SortKey, dir: SortDir): TreeNode[] {
+export function sortNodes<T extends TreeNode>(nodes: T[], key: SortKey, dir: SortDir): T[] {
   const sign = dir === "asc" ? 1 : -1;
   return [...nodes].sort((a, b) => {
     if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;

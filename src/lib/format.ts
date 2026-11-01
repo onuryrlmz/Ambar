@@ -32,3 +32,13 @@ export function formatDate(ms: number | null): string {
     hour: "2-digit", minute: "2-digit", hour12: false,
   }).format(d);
 }
+
+export function formatCrc(crc: number | null): string {
+  if (crc === null) return "—";
+  return crc.toString(16).toUpperCase().padStart(8, "0");
+}
+
+/** Item counts with the language's digit grouping: 100000 -> "100.000". */
+export function formatCount(n: number): string {
+  return n.toLocaleString(getLang() === "en" ? "en-GB" : "tr-TR");
+}

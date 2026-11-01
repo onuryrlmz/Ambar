@@ -33,3 +33,9 @@ export function t(key: string, params?: Record<string, string | number>): string
   }
   return s;
 }
+
+/** The user-facing text for a backend error; an unknown code reads as a generic I/O error. */
+export function errorText(code: string): string {
+  const key = `errors.${code}`;
+  return key in tables[getLang()] ? t(key) : t("errors.io");
+}

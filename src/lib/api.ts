@@ -93,3 +93,6 @@ export const openEntry = (
   quickLook: boolean,
   allowRisky: boolean,
 ) => invoke<void>("open_entry", { path, entry, password, quickLook, allowRisky });
+
+/** Rebuilds the native menu in this language. */
+export const setMenuLanguage = (lang: string) => invoke<void>("set_menu_language", { lang });

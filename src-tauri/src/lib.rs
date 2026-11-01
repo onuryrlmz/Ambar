@@ -3,6 +3,7 @@ pub mod commands;
 pub mod error;
 pub mod jobs;
 pub mod local_fs;
+pub mod menu;
 pub mod open_guard;
 pub mod session;
 
@@ -35,6 +36,9 @@ pub fn run() {
             let sess = session::Session::new(root);
             sess.cleanup_stale();
             app.manage(sess);
+            let handle = app.handle();
+            app.set_menu(menu::build(handle, "tr")?)?;
+            app.on_menu_event(|app, event| menu::forward_event(app, event.id().as_ref()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,6 +52,7 @@ pub fn run() {
             commands::home_dir,
             commands::parent_dir,
             commands::open_entry,
+            menu::set_menu_language,
         ])
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
