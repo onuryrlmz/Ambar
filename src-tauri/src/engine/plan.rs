@@ -98,6 +98,10 @@ pub fn safe_dest(dest_root: &Path, rel: &str) -> Result<PathBuf, ArchiveError> {
             Ok(m) if m.file_type().is_symlink() => return Err(bad()),
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            // A file sits where a parent folder is needed.
+            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
+                return Err(ArchiveError::DestConflict(rel.to_string()))
+            }
             Err(e) => return Err(e.into()),
         }
     }
@@ -336,6 +340,17 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dest.join("link")).unwrap();
         assert!(unsafe_path(safe_dest(&dest, "link/x")));
         assert!(unsafe_path(safe_dest(&dest, "link")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_in_place_of_parent_folder_is_dest_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a"), "x").unwrap();
+        assert!(matches!(
+            safe_dest(root.path(), "a/b.txt"),
+            Err(ArchiveError::DestConflict(_))
+        ));
     }
 
     #[test]
