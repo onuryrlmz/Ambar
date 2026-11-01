@@ -37,8 +37,12 @@ mod ffi {
         pub when: When,
         /// File name of the volume UnRAR asked for last (set when one was missing).
         pub volume: Option<String>,
+        /// The progress hook asked to stop (UnRAR then reports ERAR_UNKNOWN).
+        pub cancelled: bool,
     }
 
+    /// `HOST_UNIX` in UnRAR's headers.hpp.
+    const HOST_UNIX: c_uint = 3;
     pub const OM_LIST: c_uint = sys::RAR_OM_LIST;
     pub const OM_EXTRACT: c_uint = sys::RAR_OM_EXTRACT;
     pub const OP_SKIP: c_int = sys::RAR_SKIP;
@@ -51,6 +55,7 @@ mod ffi {
     pub const ERR_MISSING_PASSWORD: c_int = sys::ERAR_MISSING_PASSWORD;
     pub const ERR_BAD_PASSWORD: c_int = sys::ERAR_BAD_PASSWORD;
     pub const ERR_LARGE_DICT: c_int = sys::ERAR_LARGE_DICT;
+    pub const ERR_EWRITE: c_int = sys::ERAR_EWRITE;
     pub const ERR_EREFERENCE: c_int = sys::ERAR_EREFERENCE;
 
     #[derive(Debug)]
@@ -131,9 +136,15 @@ mod ffi {
         }
     }
 
+    /// Called with the byte count of each chunk UnRAR produces; `false` aborts.
+    type DataHook<'a> = dyn FnMut(u64) -> bool + 'a;
+
     #[derive(Default)]
     struct CbState {
         next_volume: Cell<Option<String>>,
+        /// Set only for the duration of one `process` call.
+        hook: Cell<Option<*mut DataHook<'static>>>,
+        cancelled: Cell<bool>,
     }
 
     extern "C" fn callback(
@@ -143,7 +154,7 @@ mod ffi {
         p2: sys::LPARAM,
     ) -> c_int {
         if msg == sys::UCM_CHANGEVOLUMEW {
-            if user != 0 && p1 != 0 {
+            if user != 0 && p1 != 0 && p2 == sys::RAR_VOL_ASK {
                 // SAFETY: `user` is the address of the `CbState` boxed inside the `Arc`
                 // that owns the handle, which outlives every call into the library;
                 // `p1` is the library's NUL-terminated volume name.
@@ -151,8 +162,19 @@ mod ffi {
                 let name = unsafe { wide_to_string(p1 as *const sys::WCHAR, 2048) };
                 st.next_volume.set(Some(name));
             }
-            // Next volume missing: stop. Present: continue.
+            // Next volume missing (ASK): stop. Present (NOTIFY): continue.
             return if p2 == sys::RAR_VOL_ASK { -1 } else { 0 };
+        }
+        if msg == sys::UCM_PROCESSDATA && user != 0 {
+            // SAFETY: as above; the hook pointer is valid while `process` runs, which is
+            // the only time UnRAR delivers data.
+            let st = unsafe { &*(user as *const CbState) };
+            if let Some(h) = st.hook.get() {
+                if !unsafe { (*h)(p2 as u64) } {
+                    st.cancelled.set(true);
+                    return -1;
+                }
+            }
         }
         0
     }
@@ -186,11 +208,19 @@ mod ffi {
                 code,
                 when: When::Open,
                 volume: None,
+                cancelled: false,
             };
             let name = os_path(path).ok_or_else(|| fail(sys::ERAR_EOPEN))?;
-            let pw = match password {
+            // NUL-terminated copy that is wiped on drop (a CString would keep it in freed heap).
+            let pw: Option<zeroize::Zeroizing<Vec<u8>>> = match password {
+                Some(p) if p.as_bytes().contains(&0) => {
+                    return Err(fail(sys::ERAR_BAD_PASSWORD));
+                }
                 Some(p) => {
-                    Some(std::ffi::CString::new(p).map_err(|_| fail(sys::ERAR_BAD_PASSWORD))?)
+                    let mut v = zeroize::Zeroizing::new(Vec::with_capacity(p.len() + 1));
+                    v.extend_from_slice(p.as_bytes());
+                    v.push(0);
+                    Some(v)
                 }
                 None => None,
             };
@@ -210,7 +240,7 @@ mod ffi {
                 data.op_flags = sys::ROADOF_KEEPBROKEN;
             }
             // SAFETY: `data` and the buffers it points to outlive the call.
-            let handle = unsafe { sys::RAROpenArchiveEx(&data) };
+            let handle = unsafe { sys::RAROpenArchiveEx(&mut data as *mut _) };
             let result = data.open_result as c_int;
             if handle.is_null() {
                 return Err(fail(result));
@@ -237,6 +267,7 @@ mod ffi {
                     code: result,
                     when: When::Open,
                     volume: arc.cb.next_volume.take(),
+                    cancelled: false,
                 });
             }
             if cmt_state == 1 || cmt_state == sys::ERAR_SMALL_BUF as c_uint {
@@ -256,7 +287,7 @@ mod ffi {
             };
             if let Some(pw) = pw {
                 // SAFETY: valid handle and NUL-terminated string; the library copies it.
-                unsafe { sys::RARSetPassword(arc.handle, pw.as_ptr()) };
+                unsafe { sys::RARSetPassword(arc.handle, pw.as_ptr().cast()) };
             }
             Ok(arc)
         }
@@ -266,14 +297,15 @@ mod ffi {
                 code,
                 when,
                 volume: self.cb.next_volume.take(),
+                cancelled: self.cb.cancelled.take(),
             }
         }
 
         pub fn read_header(&mut self) -> Result<Option<Header>, Fail> {
             // SAFETY: all-zero is a valid HeaderDataEx (integers and null pointers).
-            let hd: Box<sys::HeaderDataEx> = Box::new(unsafe { std::mem::zeroed() });
+            let mut hd: Box<sys::HeaderDataEx> = Box::new(unsafe { std::mem::zeroed() });
             // SAFETY: valid handle, valid output struct.
-            let code = unsafe { sys::RARReadHeaderEx(self.handle, &*hd) };
+            let code = unsafe { sys::RARReadHeaderEx(self.handle, &mut *hd as *mut _) };
             if code == sys::ERAR_END_ARCHIVE {
                 return Ok(None);
             }
@@ -295,7 +327,7 @@ mod ffi {
                 unpacked_size: ((hi as u64) << 32) | lo as u64,
                 crc: hd.file_crc,
                 attr: hd.file_attr,
-                host_unix: hd.host_os == 1,
+                host_unix: hd.host_os == HOST_UNIX,
                 redir_type: hd.redir_type,
                 mtime: (win != 0).then(|| (win / 10_000_000) as i64 - 11_644_473_600),
             }))
@@ -303,13 +335,24 @@ mod ffi {
 
         /// Processes the entry whose header was just read. `dest` is the exact file to
         /// write (only for `OP_EXTRACT`); the library's own directory logic is not used.
-        pub fn process(&mut self, op: c_int, dest: Option<&Path>) -> Result<(), Fail> {
+        pub fn process(
+            &mut self,
+            op: c_int,
+            dest: Option<&Path>,
+            hook: Option<&mut DataHook<'_>>,
+        ) -> Result<(), Fail> {
             let dest = match dest {
                 Some(d) => {
                     Some(os_path(d).ok_or_else(|| self.fail(sys::ERAR_ECREATE, When::Process))?)
                 }
                 None => None,
             };
+            let hook_ptr = hook.map(|h| {
+                // SAFETY: only the lifetime is erased; the pointer is cleared again below,
+                // before `hook` can go out of scope.
+                unsafe { std::mem::transmute::<*mut DataHook<'_>, *mut DataHook<'static>>(h) }
+            });
+            self.cb.hook.set(hook_ptr);
             let dp = dest.as_ref().map_or(std::ptr::null(), |d| d.as_ptr());
             #[cfg(any(target_os = "linux", target_os = "netbsd"))]
             // SAFETY: valid handle; `dp` is null or NUL-terminated and outlives the call.
@@ -317,6 +360,7 @@ mod ffi {
             #[cfg(not(any(target_os = "linux", target_os = "netbsd")))]
             // SAFETY: as above, wide variant.
             let code = unsafe { sys::RARProcessFileW(self.handle, op, std::ptr::null(), dp) };
+            self.cb.hook.set(None);
             if code == sys::ERAR_SUCCESS {
                 Ok(())
             } else {
@@ -360,7 +404,11 @@ impl RarEngine {
     }
 
     fn map_err(&self, f: Fail) -> ArchiveError {
+        if f.cancelled {
+            return ArchiveError::Cancelled;
+        }
         match f.code {
+            ffi::ERR_EWRITE => ArchiveError::DiskFull,
             ffi::ERR_MISSING_PASSWORD => ArchiveError::PasswordRequired,
             ffi::ERR_BAD_PASSWORD => ArchiveError::WrongPassword,
             ffi::ERR_BAD_DATA | ffi::ERR_BAD_ARCHIVE => ArchiveError::Corrupt(
@@ -427,7 +475,7 @@ impl RarEngine {
             ar.read_header()
                 .map_err(|f| self.map_err(f))?
                 .ok_or_else(|| ArchiveError::Corrupt("unexpected end of archive".into()))?;
-            ar.process(ffi::OP_SKIP, None)
+            ar.process(ffi::OP_SKIP, None, None)
                 .map_err(|f| self.map_err(f))?;
         }
         Ok(ar)
@@ -452,6 +500,7 @@ impl RarEngine {
         let mut report = OpReport::default();
         let mut done = 0u64;
         let mut index = 0usize; // headers consumed so far
+        let mut broke = false;
         let mut ar = self.open(ffi::OM_EXTRACT, pw, keep_broken, false)?;
         loop {
             if ctl.cancelled() {
@@ -462,7 +511,10 @@ impl RarEngine {
             };
             index += 1;
             let entry = to_entry(&h);
-            let skip = |ar: &mut Arc| ar.process(ffi::OP_SKIP, None).map_err(|f| self.map_err(f));
+            let skip = |ar: &mut Arc| {
+                ar.process(ffi::OP_SKIP, None, None)
+                    .map_err(|f| self.map_err(f))
+            };
             if !wanted(&entry.path) {
                 skip(&mut ar)?;
                 continue;
@@ -478,16 +530,25 @@ impl RarEngine {
             }
             ctl.progress(&entry.path, done, total);
 
-            // `Ok(None)`: handled, move on. `Ok(Some(())))`: file processed.
+            // `Err((error, true))`: UnRAR itself failed on this entry (the handle is in an
+            // unknown state); `Err((error, false))`: our own post-check failed.
             let attempt: Result<(), (ArchiveError, bool)> = match req {
                 // Test mode: verify files, nothing is written.
                 None if entry.is_dir => {
                     skip(&mut ar)?;
                     continue;
                 }
-                None => ar
-                    .process(ffi::OP_TEST, None)
-                    .map_err(|f| (self.map_err(f), true)),
+                None => {
+                    let mut bytes = 0u64;
+                    let path = entry.path.as_str();
+                    let mut hook = |n: u64| {
+                        bytes += n;
+                        ctl.progress(path, done + bytes, total);
+                        !ctl.cancelled()
+                    };
+                    ar.process(ffi::OP_TEST, None, Some(&mut hook))
+                        .map_err(|f| (self.map_err(f), true))
+                }
                 Some(req) => {
                     let plan = match plan_entry(&entry, req, ctl) {
                         Ok(p) => p,
@@ -516,11 +577,23 @@ impl RarEngine {
                         PlanOutcome::Write(dest) => {
                             let mut extract_failed = false;
                             write_via_temp(&dest, req.keep_broken, |tmp| {
-                                if let Err(f) = ar.process(ffi::OP_EXTRACT, Some(tmp)) {
+                                let mut bytes = 0u64;
+                                let path = entry.path.as_str();
+                                let mut hook = |n: u64| {
+                                    bytes += n;
+                                    ctl.progress(path, done + bytes, total);
+                                    !ctl.cancelled()
+                                };
+                                if let Err(f) =
+                                    ar.process(ffi::OP_EXTRACT, Some(tmp), Some(&mut hook))
+                                {
                                     extract_failed = true;
                                     let e = self.map_err(f);
-                                    // Only damaged data is worth keeping, never a
-                                    // half-decrypted file or the like.
+                                    // Keep (when keep_broken) only output UnRAR flagged as
+                                    // damaged data. A cancel, a missing password or a disk
+                                    // error is not corruption, so the partial file goes.
+                                    // Note a wrong password on a RAR4 file also surfaces
+                                    // as a data error, so its garbage can be kept.
                                     if !matches!(e, ArchiveError::Corrupt(_)) {
                                         let _ = std::fs::remove_file(tmp);
                                     }
@@ -552,6 +625,7 @@ impl RarEngine {
                                 path: self.path.to_string_lossy().into_owned(),
                                 error,
                             });
+                            broke = true;
                             break;
                         }
                     }
@@ -567,7 +641,41 @@ impl RarEngine {
                 Err((e, _)) => return Err(e),
             }
         }
+        if !broke {
+            if let Some(error) = self.truncation(pw) {
+                report.failed.push(FileFailure {
+                    path: self.path.to_string_lossy().into_owned(),
+                    error,
+                });
+            }
+        }
         Ok(report)
+    }
+
+    /// UnRAR reports a normal end when the file simply stops at a header boundary, so
+    /// verify that the last volume ends with an end-of-archive block. Not possible for
+    /// header-encrypted archives (the block is encrypted).
+    fn truncation(&self, pw: Option<&Password>) -> Option<ArchiveError> {
+        if let Ok(a) = self.open(ffi::OM_LIST, pw, false, false) {
+            if a.flags.enc_headers {
+                return None;
+            }
+        }
+        let first = Archive::new(&self.path);
+        let last = (1..=9999)
+            .map_while(|n| {
+                first
+                    .nth_part(n)
+                    .filter(|p| std::fs::symlink_metadata(p).is_ok())
+            })
+            .last()
+            .unwrap_or_else(|| self.path.clone());
+        match end_marker_state(&last) {
+            Some(false) => Some(ArchiveError::Corrupt(
+                "archive is truncated: end-of-archive block missing".into(),
+            )),
+            _ => None,
+        }
     }
 
     fn list_inner(&self, pw: Option<&Password>) -> Result<(ArchiveInfo, Vec<Entry>), ArchiveError> {
@@ -593,7 +701,7 @@ impl RarEngine {
         let mut entries = vec![];
         while let Some(h) = ar.read_header().map_err(|f| self.map_err(f))? {
             entries.push(to_entry(&h));
-            ar.process(ffi::OP_SKIP, None)
+            ar.process(ffi::OP_SKIP, None, None)
                 .map_err(|f| self.map_err(f))?;
         }
         Ok((info, entries))
@@ -620,6 +728,59 @@ fn to_entry(h: &Header) -> Entry {
 /// because the attributes alone can be forged to look like a regular file.
 fn is_redirect(h: &Header) -> bool {
     h.redir_type != 0 || (h.host_unix && h.attr & 0o170000 == 0o120000)
+}
+
+/// `Some(true)` if the file ends with an end-of-archive block, `Some(false)` if it does
+/// not, `None` if the format is not recognised (then nothing is claimed).
+fn end_marker_state(path: &Path) -> Option<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut sig = [0u8; 8];
+    let n = f.read(&mut sig).ok()?;
+    let rar5 = n >= 8 && sig == *b"Rar!\x1a\x07\x01\x00";
+    let rar4 = n >= 7 && sig[..7] == *b"Rar!\x1a\x07\x00";
+    if !rar5 && !rar4 {
+        return None;
+    }
+    let want = len.min(32) as usize;
+    let mut tail = vec![0u8; want];
+    f.seek(SeekFrom::Start(len - want as u64)).ok()?;
+    f.read_exact(&mut tail).ok()?;
+    if rar5 {
+        // CRC32 | size=3 | type=5 | header flags (0, or 4 as rar writes it) | end flags (bit 0: more volumes)
+        let ok = tail.len() >= 8 && {
+            let b = &tail[tail.len() - 8..];
+            b[4] == 3
+                && b[5] == 5
+                && b[6] & !0x04 == 0
+                && b[7] <= 1
+                && u32::from_le_bytes([b[0], b[1], b[2], b[3]]) == crc32(&b[4..])
+        };
+        Some(ok)
+    } else {
+        // CRC16 | type 0x7B | flags (2) | size (2, includes optional fields)
+        let ok = (7..=tail.len().min(20)).any(|k| {
+            let b = &tail[tail.len() - k..];
+            b[2] == 0x7B && u16::from_le_bytes([b[5], b[6]]) as usize == k
+        });
+        Some(ok)
+    }
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 /// Second layer: what UnRAR left at the temp path must be a plain file with a
@@ -1069,10 +1230,10 @@ mod tests {
         loop {
             let h = ar.read_header().unwrap().unwrap();
             if h.filename == "kok.txt" {
-                ar.process(ffi::OP_EXTRACT, Some(&target)).unwrap();
+                ar.process(ffi::OP_EXTRACT, Some(&target), None).unwrap();
                 break;
             }
-            ar.process(ffi::OP_SKIP, None).unwrap();
+            ar.process(ffi::OP_SKIP, None, None).unwrap();
         }
         assert_eq!(walk(dest.path()), vec!["tam-bu.tmp".to_string()]);
         assert_eq!(fs::read_to_string(&target).unwrap(), "kok\n");
@@ -1275,5 +1436,118 @@ mod tests {
         c.choice = ConflictChoice::Cancel;
         let res = RarEngine::new(&fixture("plain5.rar")).extract(None, &r, &mut c);
         assert!(matches!(res, Err(ArchiveError::Cancelled)), "{res:?}");
+    }
+
+    #[test]
+    fn cancel_inside_a_file_leaves_nothing_in_both_keep_broken_modes() {
+        for keep in [false, true] {
+            let dest = tempfile::tempdir().unwrap();
+            let mut r = req(dest.path());
+            r.keep_broken = keep;
+            let mut c = ctl();
+            // Not cancelled before the first entry starts, cancelled at its first data chunk.
+            c.cancel_after = Some(1);
+            let res = RarEngine::new(&fixture("stored.rar")).extract(None, &r, &mut c);
+            assert!(
+                matches!(res, Err(ArchiveError::Cancelled)),
+                "keep={keep}: {res:?}"
+            );
+            assert_eq!(walk(dest.path()), Vec::<String>::new(), "keep={keep}");
+            // A new engine on the same archive still extracts everything.
+            let rep = RarEngine::new(&fixture("stored.rar"))
+                .extract(None, &r, &mut ctl())
+                .unwrap();
+            assert!(rep.failed.is_empty());
+            assert_eq!(fs::read(dest.path().join("buyuk.bin")).unwrap(), buyuk());
+        }
+    }
+
+    #[test]
+    fn cancel_inside_a_file_during_test_mode() {
+        let mut c = ctl();
+        c.cancel_after = Some(1);
+        let res = RarEngine::new(&fixture("stored.rar")).test(None, &mut c);
+        assert!(matches!(res, Err(ArchiveError::Cancelled)), "{res:?}");
+    }
+
+    #[test]
+    fn progress_reports_bytes_while_a_file_is_written() {
+        struct P(Vec<u64>);
+        impl JobCtl for P {
+            fn progress(&mut self, _: &str, done: u64, _: u64) {
+                self.0.push(done);
+            }
+            fn cancelled(&self) -> bool {
+                false
+            }
+            fn resolve_conflict(&mut self, _: &Path) -> ConflictChoice {
+                ConflictChoice::Overwrite
+            }
+        }
+        let dest = tempfile::tempdir().unwrap();
+        let mut p = P(vec![]);
+        RarEngine::new(&fixture("stored.rar"))
+            .extract(None, &req(dest.path()), &mut p)
+            .unwrap();
+        assert!(p.0.contains(&20480), "{:?}", p.0);
+    }
+
+    #[test]
+    fn truncated_archive_is_never_reported_clean() {
+        let whole = fs::read(fixture("plain5.rar")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cut = dir.path().join("cut.rar");
+        for len in 0..whole.len() {
+            fs::write(&cut, &whole[..len]).unwrap();
+            let dest = tempfile::tempdir().unwrap();
+            let t = RarEngine::new(&cut).test(None, &mut ctl());
+            assert!(
+                t.is_err() || t.as_ref().is_ok_and(|r| !r.failed.is_empty()),
+                "test at {len}: {t:?}"
+            );
+            let x = RarEngine::new(&cut).extract(None, &req(dest.path()), &mut ctl());
+            assert!(
+                x.is_err() || x.as_ref().is_ok_and(|r| !r.failed.is_empty()),
+                "extract at {len}: {x:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_whole_fixture_passes_the_end_marker_check() {
+        for n in [
+            "plain5.rar",
+            "plain4.rar",
+            "solid.rar",
+            "comment.rar",
+            "locked.rar",
+            "recovery.rar",
+            "multi.part1.rar",
+            "multi.part2.rar",
+            "stored.rar",
+            "enc.rar",
+        ] {
+            let rep = RarEngine::new(&fixture(n)).test(None, &mut ctl());
+            let rep = match (n, rep) {
+                ("enc.rar", Err(ArchiveError::PasswordRequired)) => continue,
+                (_, r) => r.unwrap_or_else(|e| panic!("{n}: {e:?}")),
+            };
+            assert!(rep.failed.is_empty(), "{n}: {:?}", rep.failed);
+        }
+        let rep = RarEngine::new(&fixture("enc-headers.rar"))
+            .test(Some(&pw("Test123")), &mut ctl())
+            .unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+    }
+
+    #[test]
+    fn missing_data_to_disk_full_mapping() {
+        let e = RarEngine::new(Path::new("x.rar")).map_err(ffi::Fail {
+            code: ffi::ERR_EWRITE,
+            when: ffi::When::Process,
+            volume: None,
+            cancelled: false,
+        });
+        assert!(matches!(e, ArchiveError::DiskFull), "{e:?}");
     }
 }

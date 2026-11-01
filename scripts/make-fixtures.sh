@@ -61,6 +61,14 @@ cp "$ROOT/src-tauri/tests/buyuk.bin" "$SRC/buyuk.bin"
 "$RAR" a $Q -ma5 -v12k "$OUT/multi.rar" buyuk.bin kok.txt
 rm "$SRC/buyuk.bin"
 
+# stored (-m0) incompressible file first, then a small one: for cancel-inside-a-file tests
+ST="$WORK/st"
+mkdir -p "$ST"
+cp "$ROOT/src-tauri/tests/buyuk.bin" "$ST/buyuk.bin"
+printf 'kok\n' > "$ST/kok.txt"
+touch -t 202001020304.05 "$ST/buyuk.bin" "$ST/kok.txt"
+( cd "$ST" && "$RAR" a $Q -ma5 -m0 "$OUT/stored.rar" buyuk.bin kok.txt )
+
 # symlink: l -> /tmp stored as a link entry
 LNK="$WORK/lnk"
 mkdir -p "$LNK"
