@@ -150,6 +150,7 @@ impl ZipEngine {
                             report.skipped += 1;
                             continue;
                         }
+                        PlanOutcome::Nothing => continue,
                         PlanOutcome::Write(dest) if entry.is_dir => {
                             std::fs::create_dir_all(&dest)?;
                             report.ok += 1;

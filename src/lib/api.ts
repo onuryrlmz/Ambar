@@ -1,18 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { toArchiveError } from "./flows.ts";
 import type {
-  ArchiveError, ConflictChoice, ConflictEvent, DoneEvent, ExtractRequest, LocalEntry,
+  ConflictChoice, ConflictEvent, DoneEvent, ExtractRequest, LocalEntry,
   OpenResult, ProgressEvent,
 } from "./types.ts";
 
-/** Errors reject with `{ code, detail }`; anything else becomes a generic `io` error. */
-export function toArchiveError(e: unknown): ArchiveError {
-  if (e && typeof e === "object" && "code" in e && typeof (e as ArchiveError).code === "string") {
-    const x = e as ArchiveError;
-    return { code: x.code, detail: typeof x.detail === "string" ? x.detail : "" };
-  }
-  return { code: "io", detail: String(e) };
-}
+export { toArchiveError };
 
 /** The frontend owns job ids, so it can listen before the job starts. */
 export function newJobId(): string {
@@ -93,6 +87,9 @@ export const openEntry = (
   quickLook: boolean,
   allowRisky: boolean,
 ) => invoke<void>("open_entry", { path, entry, password, quickLook, allowRisky });
+
+/** Opens a local file with its default app. Rejects with `risky_open` like `openEntry`. */
+export const openLocal = (path: string, allowRisky: boolean) => invoke<void>("open_local", { path, allowRisky });
 
 /** Rebuilds the native menu in this language. */
 export const setMenuLanguage = (lang: string) => invoke<void>("set_menu_language", { lang });

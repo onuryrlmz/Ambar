@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  archiveCrumbs, baseName, clampSplit, closeTab, emptyTabs, fitColumns, focusTab, isArchiveName, isReloadKey,
-  keyCommand, listModel, localCrumbs, moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pressRow,
-  pruneSelection, rowKey, selectAll, selectClick, selectedPaths, selectionSummary, toggleCursor, toggleSort, updateTab,
+  archiveCrumbs, baseName, beginGesture, clampSplit, closeTab, emptyTabs, fileToShow, fitColumns, focusTab, isArchiveName, isCloseTabKey, isReloadKey,
+  keyCommand, listModel, localCrumbs, moveGesture, moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pressRow,
+  pruneSelection, releaseGesture, rowKey, selectAll, selectClick, selectedPaths, selectionSummary, toggleCursor, toggleSort, updateTab,
 } from "../src/lib/tabs-core.ts";
 
 const list = (keys) => ({ keys, indexOf: new Map(keys.map((k, i) => [k, i])) });
@@ -310,4 +310,48 @@ test("columns that do not fit drop by priority and the name keeps its minimum", 
   assert.deepEqual(keys(225), ["size"]);
   assert.deepEqual(keys(100), []);
   assert.deepEqual(keys(300), ["size", "packed"], "packed still fits after modified did not");
+});
+
+test("a press inside a multi-selection collapses on a plain release", () => {
+  const order = list(["f:a", "f:b", "f:c"]);
+  const view = { ...newView(""), selection: new Set(["f:a", "f:b"]), cursor: "f:a", anchor: "f:a" };
+  const pressed = pressRow(view, order, 1, {});
+  assert.equal(pressed.collapseOnRelease, true);
+  const g = beginGesture(100, 100, 1);
+  assert.equal(releaseGesture(g, 1), 1, "released on the same row, no drag");
+  assert.equal(releaseGesture(g, 2), null, "released on another row");
+});
+
+test("a real drag cancels the collapse, so the multi-selection survives", () => {
+  let g = beginGesture(100, 100, 1);
+  const small = moveGesture(g, 102, 101);
+  assert.equal(small.started, false, "a shaky click is not a drag");
+  assert.equal(releaseGesture(small.gesture, 1), 1);
+  const far = moveGesture(small.gesture, 112, 100);
+  assert.equal(far.started, true);
+  g = far.gesture;
+  assert.equal(releaseGesture(g, 1), null, "dragged back to the same row and released: no collapse");
+  const again = moveGesture(g, 200, 200);
+  assert.equal(again.started, false, "the drag starts once");
+});
+
+test("Close Tab key: Ctrl+W off the Mac only, and never with Shift", () => {
+  const k = (o) => ({ key: "w", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...o });
+  assert.equal(isCloseTabKey(k({ ctrlKey: true }), false), true);
+  assert.equal(isCloseTabKey(k({ ctrlKey: true, key: "W" }), false), true);
+  assert.equal(isCloseTabKey(k({ ctrlKey: true, shiftKey: true, key: "W" }), false), false, "that is Close Window");
+  assert.equal(isCloseTabKey(k({ metaKey: true }), true), false, "the menu owns it on the Mac");
+  assert.equal(isCloseTabKey(k({}), false), false);
+});
+
+test("fileToShow: the one selected file, or the cursor's file when nothing is selected", () => {
+  const model = listModel([row("alt", true), row("a.txt"), row("b.txt")]);
+  const v = newView("");
+  assert.equal(fileToShow(v, model), null);
+  assert.equal(fileToShow({ ...v, cursor: "f:a.txt" }, model).path, "a.txt");
+  assert.equal(fileToShow({ ...v, cursor: "d:alt" }, model), null, "a folder is not shown");
+  assert.equal(fileToShow({ ...v, selection: new Set(["f:b.txt"]), cursor: "f:a.txt" }, model).path, "b.txt");
+  assert.equal(fileToShow({ ...v, selection: new Set(["d:alt"]) }, model), null);
+  assert.equal(fileToShow({ ...v, selection: new Set(["f:a.txt", "f:b.txt"]) }, model), null, "two is ambiguous");
+  assert.equal(fileToShow({ ...v, selection: new Set(["f:gone"]) }, model), null);
 });

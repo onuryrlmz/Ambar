@@ -7,11 +7,11 @@
   import Icon from "./Icon.svelte";
 
   let {
-    hasArchive,
+    can,
     onAction,
   }: {
-    /** An opened archive is showing, so the archive actions make sense. */
-    hasArchive: boolean;
+    /** Which actions make sense right now. */
+    can: Record<ToolAction, boolean>;
     onAction: (a: ToolAction) => void;
   } = $props();
 
@@ -33,7 +33,7 @@
   {#each tools as x (x.id)}
     {#if x.gapBefore}<span class="gap"></span>{/if}
     {@const stage2 = isStage2(x.id)}
-    {@const off = stage2 || !hasArchive}
+    {@const off = stage2 || !can[x.id as ToolAction]}
     <!-- aria-disabled rather than disabled: a disabled button shows no tooltip in WebKit. -->
     <button
       class="tool"

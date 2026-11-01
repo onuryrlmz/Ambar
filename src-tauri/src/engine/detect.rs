@@ -30,6 +30,9 @@ fn has_ext(name: &str, exts: &[&str]) -> bool {
 /// Detects the archive format from file content; the name only disambiguates
 /// compressed tarballs from plain compressed files.
 pub fn detect_format(path: &Path) -> Result<Format, ArchiveError> {
+    if path.is_dir() {
+        return Err(ArchiveError::NotAnArchive);
+    }
     let mut buf = Vec::new();
     std::fs::File::open(path)?
         .take(SCAN_LIMIT)
@@ -92,6 +95,12 @@ mod tests {
         let p = dir.path().join(name);
         std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
         (dir, p)
+    }
+
+    #[test]
+    fn a_folder_is_not_an_archive() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(matches!(detect_format(d.path()), Err(ArchiveError::NotAnArchive)));
     }
 
     #[test]

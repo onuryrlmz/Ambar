@@ -12,7 +12,10 @@ use unicode_normalization::UnicodeNormalization;
 #[derive(Debug, PartialEq, Eq)]
 pub enum PlanOutcome {
     Write(PathBuf),
+    /// The user's policy or answer left the existing file alone. Counts as skipped.
     Skip,
+    /// This entry has no output of its own: the base folder, or a folder when flattening.
+    Nothing,
 }
 
 /// Converts `\` to `/`, strips leading `/` and `./`, applies NFC.
@@ -172,10 +175,10 @@ pub fn plan_entry(
     ctl: &mut dyn JobCtl,
 ) -> Result<PlanOutcome, ArchiveError> {
     let Some(rel) = output_rel(&entry.path, req) else {
-        return Ok(PlanOutcome::Skip);
+        return Ok(PlanOutcome::Nothing);
     };
     if entry.is_dir && !req.keep_paths {
-        return Ok(PlanOutcome::Skip);
+        return Ok(PlanOutcome::Nothing);
     }
     let dest = safe_dest(&req.dest, &rel)?;
     let existing = match std::fs::symlink_metadata(&dest) {

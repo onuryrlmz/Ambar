@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import Crumbs from "./Crumbs.svelte";
+  import type { OpenFailureText } from "./flows.ts";
   import FileList, { type Column } from "./FileList.svelte";
   import { formatBytes, formatCrc, formatDate, formatRatio } from "./format.ts";
   import { errorText, t } from "./i18n/index.ts";
@@ -14,12 +15,14 @@
     onActivate,
     onOpenEntry,
     onQuickLook,
+    onDragStart,
   }: {
     active: boolean;
     onActivate: () => void;
     /** Enter or double-click on a file inside the archive. */
     onOpenEntry?: (row: TreeNode) => void;
     onQuickLook?: (row: TreeNode) => void;
+    onDragStart?: (x: number, y: number) => void;
   } = $props();
 
   const columns: Column<TreeNode>[] = [
@@ -48,6 +51,13 @@
     void tab.id;
     tick().then(() => strip?.querySelector(".tab.current")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
   });
+
+  function failureText(f: OpenFailureText): string {
+    if (f.kind === "one") return t("archive.openFailed", { name: f.name, message: errorText(f.code) });
+    if (f.code === null) return t("drop.mixed", { n: f.n, names: f.names });
+    if (f.code === "not_archive") return t("drop.notArchives", { n: f.n, names: f.names });
+    return t("drop.notArchive", { n: f.n, names: f.names, message: errorText(f.code) });
+  }
 
   function goToFolder(dir: string, cameFrom?: string) {
     updateActive((x) => navigate(x, dir, cameFrom));
@@ -143,7 +153,7 @@
   {#if openFailure}
     <div class="banner" role="alert">
       <Icon name="alert" size={14} />
-      <span class="message">{t("archive.openFailed", { name: openFailure.name, message: errorText(openFailure.code) })}</span>
+      <span class="message">{failureText(openFailure)}</span>
       <button class="nav-btn" title={t("common.close")} tabindex="-1" onclick={dismissArchiveError}><Icon name="close" size={12} /></button>
     </div>
   {/if}
@@ -165,6 +175,7 @@
       onOpen={open}
       onUp={up}
       onSpace={(r) => onQuickLook?.(r)}
+      {onDragStart}
     >
       {#snippet nameAfter(r: TreeNode)}
         {#if r.encrypted}

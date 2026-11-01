@@ -354,6 +354,10 @@ impl Run<'_> {
                         let _ = self.drain(&mut *data)?;
                         return Ok(());
                     }
+                    PlanOutcome::Nothing => {
+                        let _ = self.drain(&mut *data)?;
+                        return Ok(());
+                    }
                     PlanOutcome::Write(dest) if entry.is_dir => {
                         std::fs::create_dir_all(&dest)?;
                         self.report.ok += 1;

@@ -259,6 +259,16 @@ pub async fn open_entry(
         .map_err(|e| ArchiveError::Io(e.to_string()))
 }
 
+/// Opens a file from the local pane with its default app. The check and the open both
+/// happen here, so the frontend needs no opener permission for arbitrary paths.
+#[tauri::command]
+pub fn open_local(app: AppHandle, path: String, allow_risky: bool) -> Result<(), ArchiveError> {
+    open_guard::check_local_open(Path::new(&path), allow_risky)?;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| ArchiveError::Io(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -30,6 +30,13 @@
   --warn-ink: #5d4306;
   --warn-icon: #b0790b;
 
+  --scrim: rgb(20 24 30 / 0.28);
+  --panel-shadow: 0 1px 2px rgb(20 24 30 / 0.16), 0 14px 40px rgb(20 24 30 / 0.24);
+  --accent-press: #0b5a63;
+  --accent-ink: #ffffff;
+  --rail: #d5d8db;
+  --good: #1f7a4d;
+
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Cantarell, "Noto Sans", sans-serif;
 }
 
@@ -61,6 +68,13 @@
     --warn-line: #5a4a20;
     --warn-ink: #eedcab;
     --warn-icon: #e0a43c;
+
+    --scrim: rgb(0 0 0 / 0.42);
+    --panel-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 16px 44px rgb(0 0 0 / 0.5);
+    --accent-press: #10606a;
+    --accent-ink: #ffffff;
+    --rail: #1f2124;
+    --good: #58c08c;
   }
 }
 
@@ -204,6 +218,80 @@ button {
 .path-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* Dialog controls. */
+.btn {
+  min-width: 76px;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font-size: 12.5px;
+  white-space: nowrap;
+  outline: none;
+}
+.btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+.btn:active:not(:disabled) {
+  background: var(--press);
+}
+.btn:disabled {
+  color: var(--ink-3);
+}
+.btn.primary {
+  background: var(--sel);
+  box-shadow: none;
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent-press);
+}
+.btn.primary:active:not(:disabled) {
+  background: var(--accent-press);
+}
+.btn.primary:disabled {
+  opacity: 0.5;
+}
+.btn:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--line), 0 0 0 2px var(--accent);
+}
+.btn.primary:focus-visible {
+  box-shadow: 0 0 0 1px var(--chrome-raised), 0 0 0 3px var(--accent);
+}
+
+.field {
+  min-width: 0;
+  height: 26px;
+  padding: 0 7px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.check input {
+  margin: 0;
+  accent-color: var(--sel);
 }
 
 .banner {

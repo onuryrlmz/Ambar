@@ -7,7 +7,7 @@
   import { selectionSummary, type ListModel, type PaneView } from "./tabs-core.ts";
 
   // Two halves that line up with the panes above them.
-  let { split }: { split: number } = $props();
+  let { split, busy = false }: { split: number; busy?: boolean } = $props();
 
   function describe(model: ListModel<{ size: number }>, view: PaneView): string {
     const s = selectionSummary(model, view.selection);
@@ -24,7 +24,7 @@
 <footer class="status" style:grid-template-columns="{split * 100}% 1fr">
   <div class="half"><span class="text">{left}</span></div>
   <div class="half">
-    <span class="text">{right}</span>
+    <span class="text">{busy ? t("status.opening") : right}</span>
     {#if tab?.info}
       <span class="facts">
         {#if tab.locked}

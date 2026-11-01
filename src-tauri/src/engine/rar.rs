@@ -567,6 +567,10 @@ impl RarEngine {
                             skip(&mut ar)?;
                             continue;
                         }
+                        PlanOutcome::Nothing => {
+                            skip(&mut ar)?;
+                            continue;
+                        }
                         PlanOutcome::Write(dest) if entry.is_dir => {
                             std::fs::create_dir_all(&dest)?;
                             report.ok += 1;
@@ -969,6 +973,24 @@ mod tests {
         assert!(failed, "{r:?}");
         assert_eq!(files_only(dest.path()), Vec::<String>::new());
         assert!(!walk(dest.path()).iter().any(|p| p.contains("ambar-part")));
+    }
+
+    #[test]
+    fn folders_with_no_output_are_not_counted_as_skipped() {
+        let dest = tempfile::tempdir().unwrap();
+        let mut r = req(dest.path());
+        r.selection = vec!["belgeler".into()];
+        r.base = "belgeler".into();
+        let rep = RarEngine::new(&fixture("plain5.rar")).extract(None, &r, &mut ctl()).unwrap();
+        assert_eq!(rep.skipped, 0, "the base folder itself");
+        assert!(dest.path().join("rapor.txt").is_file());
+
+        let dest = tempfile::tempdir().unwrap();
+        let mut r = req(dest.path());
+        r.keep_paths = false;
+        let rep = RarEngine::new(&fixture("plain5.rar")).extract(None, &r, &mut ctl()).unwrap();
+        assert_eq!(rep.skipped, 0, "folders when flattening");
+        assert!(dest.path().join("rapor.txt").is_file());
     }
 
     #[test]

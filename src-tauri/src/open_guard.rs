@@ -49,6 +49,19 @@ pub fn check_risky(name: &str, allow_risky: bool) -> Result<(), ArchiveError> {
     }
 }
 
+/// Whether a file from the local pane may go to its default app. A link is judged by its
+/// target as well: `masum.txt` pointing at a script launches the script.
+pub fn check_local_open(path: &Path, allow_risky: bool) -> Result<(), ArchiveError> {
+    if !path.is_file() {
+        return Err(ArchiveError::Io("not a file".into()));
+    }
+    let real = std::fs::canonicalize(path)?;
+    for p in [path, real.as_path()] {
+        check_risky(&p.file_name().unwrap_or_default().to_string_lossy(), allow_risky)?;
+    }
+    Ok(())
+}
+
 /// Removes execute permission bits.
 #[cfg(unix)]
 pub fn strip_exec_bits(file: &Path) -> Result<(), ArchiveError> {
@@ -143,6 +156,38 @@ pub fn harden(file: &Path, mark: bool) -> Result<(), ArchiveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_open_refuses_a_folder_and_a_missing_file() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(matches!(check_local_open(d.path(), true), Err(ArchiveError::Io(_))));
+        assert!(matches!(check_local_open(&d.path().join("yok.txt"), true), Err(ArchiveError::Io(_))));
+    }
+
+    #[test]
+    fn local_open_guards_risky_types_unless_allowed() {
+        let d = tempfile::tempdir().unwrap();
+        let plain = d.path().join("belge.txt");
+        std::fs::write(&plain, b"x").unwrap();
+        check_local_open(&plain, false).unwrap();
+        let name = if cfg!(windows) { "a.exe" } else if cfg!(target_os = "macos") { "a.command" } else { "a.sh" };
+        let risky = d.path().join(name);
+        std::fs::write(&risky, b"x").unwrap();
+        assert!(matches!(check_local_open(&risky, false), Err(ArchiveError::RiskyOpen(_))));
+        check_local_open(&risky, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_open_judges_a_link_by_its_target_too() {
+        let d = tempfile::tempdir().unwrap();
+        let name = if cfg!(target_os = "macos") { "a.command" } else { "a.sh" };
+        let risky = d.path().join(name);
+        std::fs::write(&risky, b"x").unwrap();
+        let link = d.path().join("masum.txt");
+        std::os::unix::fs::symlink(&risky, &link).unwrap();
+        assert!(matches!(check_local_open(&link, false), Err(ArchiveError::RiskyOpen(_))));
+    }
 
     #[test]
     fn risky_lists_are_case_insensitive_and_use_final_extension() {

@@ -16,12 +16,14 @@
     onActivate,
     onOpenFile,
     onQuickLook,
+    onDragStart,
   }: {
     active: boolean;
     onActivate: () => void;
-    /** Enter or double-click on a file: the page tries to open it as an archive. */
+    /** Enter or double-click on a file: an archive opens in a tab, anything else in its app. */
     onOpenFile: (path: string) => void;
     onQuickLook?: (row: LocalRow) => void;
+    onDragStart?: (x: number, y: number) => void;
   } = $props();
 
   const columns: Column<LocalRow>[] = [
@@ -130,6 +132,7 @@
     onOpen={open}
     onUp={() => void goUp()}
     onSpace={(r) => onQuickLook?.(r)}
+    {onDragStart}
     dim={(r) => r.hidden}
   >
     {#snippet nameAfter(r: LocalRow)}

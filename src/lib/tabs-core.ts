@@ -161,6 +161,30 @@ export function pressRow<V extends PaneView>(
   return { view: selectClick(view, order, i, mods), collapseOnRelease: false };
 }
 
+/** A mouse gesture on a row: from the press until the release. */
+export interface RowGesture {
+  x: number;
+  y: number;
+  /** From `pressRow`: the row a release without a drag narrows the selection to. */
+  collapse: number | null;
+  dragging: boolean;
+}
+
+export const DRAG_THRESHOLD = 5;
+
+export const beginGesture = (x: number, y: number, collapse: number | null): RowGesture => ({
+  x, y, collapse, dragging: false,
+});
+
+/** `started` is true on the one move that turns the press into a drag. A drag never collapses. */
+export function moveGesture(g: RowGesture, x: number, y: number): { gesture: RowGesture; started: boolean } {
+  if (g.dragging || Math.hypot(x - g.x, y - g.y) < DRAG_THRESHOLD) return { gesture: g, started: false };
+  return { gesture: { ...g, dragging: true, collapse: null }, started: true };
+}
+
+/** The row to narrow the selection to when the gesture ends on row `i`, if any. */
+export const releaseGesture = (g: RowGesture, i: number): number | null => (g.collapse === i ? i : null);
+
 /** Keyboard move to row `i` (clamped); `extend` grows the selection from the anchor. */
 export function moveTo<V extends PaneView>(view: V, order: RowOrder, i: number, extend: boolean): V {
   const { keys } = order;
@@ -207,6 +231,16 @@ export interface ListModel<R> {
 export function listModel<R extends { isDir: boolean; path: string }>(rows: R[]): ListModel<R> {
   const keys = rows.map(rowKey);
   return { rows, keys, indexOf: new Map(keys.map((k, i) => [k, i])) };
+}
+
+/** What Göster acts on: the one selected file, or the cursor's file when nothing is selected. */
+export function fileToShow<R extends { isDir: boolean }>(view: SavedView, model: ListModel<R>): R | null {
+  let key = view.cursor;
+  if (view.selection.size > 1) return null;
+  for (const only of view.selection) key = only;
+  const i = key === null ? undefined : model.indexOf.get(key);
+  const r = i === undefined ? undefined : model.rows[i];
+  return r && !r.isDir ? r : null;
 }
 
 export function selectionSummary(
@@ -340,6 +374,11 @@ export function keyCommand(e: KeyMods): KeyCommand | null {
 
 export function isReloadKey(e: Pick<KeyMods, "key" | "metaKey" | "ctrlKey">): boolean {
   return e.key === "F5" || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r");
+}
+
+/** Off the Mac the page handles Ctrl+W itself. Ctrl+Shift+W is Close Window, the menu's. */
+export function isCloseTabKey(e: KeyMods, mac: boolean): boolean {
+  return !mac && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "w";
 }
 
 export const MIN_PANE_PX = 260;

@@ -24,6 +24,7 @@
   const ROW_H = 24;
   const MIN_NAME = 260;
   const INSET = 12;
+  const OVERLAY_BAR = 16;
 
   let {
     model,
@@ -40,6 +41,7 @@
     onOpen,
     onUp,
     onSpace,
+    onDragStart,
     dim,
     nameAfter,
   }: {
@@ -59,6 +61,8 @@
     onUp: () => void;
     /** Space on the Mac (Quick Look). */
     onSpace?: (row: R) => void;
+    /** A press on a row became a drag, carrying the selection. */
+    onDragStart?: (x: number, y: number) => void;
     dim?: (row: R) => boolean;
     nameAfter?: Snippet<[R]>;
   } = $props();
@@ -98,29 +102,49 @@
     return k !== undefined && view.selection.has(k);
   };
 
-  /** The row to narrow the selection to if the press ends without a drag. */
-  let collapse: number | null = null;
+  /** From a press on a row until its release, or until the drag takes over. */
+  let gesture: core.RowGesture | null = null;
 
   function press(e: MouseEvent, i: number) {
     if (e.button !== 0) return;
     onActivate();
     const pressed = core.pressRow(view, model, i, { toggle: e.metaKey || e.ctrlKey, range: e.shiftKey });
-    collapse = pressed.collapseOnRelease ? i : null;
+    gesture = core.beginGesture(e.clientX, e.clientY, pressed.collapseOnRelease ? i : null);
     onView(pressed.view);
   }
 
   function release(i: number) {
-    if (collapse === i) onView(core.selectClick(view, model, i, {}));
-    collapse = null;
+    if (gesture && core.releaseGesture(gesture, i) !== null) onView(core.selectClick(view, model, i, {}));
+    gesture = null;
+  }
+
+  function moved(e: MouseEvent) {
+    if (!gesture) return;
+    // The button came up where we could not see it.
+    if (e.buttons === 0) {
+      gesture = null;
+      return;
+    }
+    const next = core.moveGesture(gesture, e.clientX, e.clientY);
+    gesture = next.gesture;
+    if (next.started) onDragStart?.(e.clientX, e.clientY);
+  }
+
+  /** Clicking the blank area clears the selection; a scrollbar is not the blank area. */
+  function onScrollbar(e: MouseEvent, target: Element, vl: HTMLElement): boolean {
+    const box = vl.getBoundingClientRect();
+    // A classic scrollbar lands beyond the client width.
+    if (e.clientX - box.left >= vl.clientWidth) return true;
+    // A Mac overlay scrollbar takes no width, and a press on it lands on the scroller itself.
+    return target === vl && vl.scrollHeight > vl.clientHeight && box.right - e.clientX <= OVERLAY_BAR;
   }
 
   function pressBlank(e: MouseEvent) {
     onActivate();
     const target = e.target as Element;
     if (target.closest(".row")) return;
-    // A press on a classic scrollbar lands on the scroller, beyond its client width.
     const vl = body?.querySelector<HTMLElement>(".vl");
-    if (vl && e.clientX - vl.getBoundingClientRect().left >= vl.clientWidth) return;
+    if (vl && onScrollbar(e, target, vl)) return;
     onView(core.clearSelection(view));
   }
 
@@ -188,7 +212,7 @@
   const sortIcon = $derived(sortDir === "asc" ? "sortUp" : "sortDown");
 </script>
 
-<svelte:window onmouseup={() => (collapse = null)} />
+<svelte:window onmouseup={() => (gesture = null)} onmousemove={moved} />
 
 <div class="list" class:active bind:clientWidth={width}>
   <div

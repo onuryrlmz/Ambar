@@ -70,14 +70,15 @@ export async function goHome(): Promise<void> {
 }
 
 export async function goUp(): Promise<void> {
-  const mine = ++latest;
   const here = view.cwd;
   if (!here) return;
+  // At the root there is nowhere to go, and that must not outrank a navigation in flight.
+  const seen = latest;
   try {
     const parent = await parentDir(here);
-    if (mine === latest && parent !== null) await show(mine, parent, here);
+    if (seen === latest && parent !== null) await show(++latest, parent, here);
   } catch (e) {
-    if (mine === latest) listError = { path: here, code: toArchiveError(e).code };
+    if (seen === latest) listError = { path: here, code: toArchiveError(e).code };
   }
 }
 

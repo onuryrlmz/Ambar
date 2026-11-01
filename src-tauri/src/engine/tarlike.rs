@@ -467,6 +467,7 @@ impl TarLikeEngine {
                             report.skipped += 1;
                             return Ok(Flow::Next);
                         }
+                        PlanOutcome::Nothing => return Ok(Flow::Next),
                         PlanOutcome::Write(dest) if entry.is_dir => {
                             std::fs::create_dir_all(&dest)?;
                             report.ok += 1;
@@ -519,6 +520,7 @@ impl TarLikeEngine {
                     report.skipped += 1;
                     return Ok(report);
                 }
+                Ok(PlanOutcome::Nothing) => return Ok(report),
                 Ok(PlanOutcome::Write(dest)) => {
                     write_entry(&dest, req.keep_broken, &mut data, &entry.path, ctl, 0, 0)
                 }
