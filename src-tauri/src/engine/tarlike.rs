@@ -5,7 +5,9 @@
 //! is reported as `Corrupt`: a truncated archive is never clean.
 
 use super::plan::PlanOutcome;
-use super::plan::{copy_stream, is_selected, normalize_entry_path, plan_entry, write_entry};
+use super::plan::{
+    copy_stream, is_selected, normalize_entry_path, plan_entry, skip_stream, write_entry, Exact,
+};
 use super::{
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
     Password,
@@ -30,7 +32,7 @@ enum Kind {
     File,
     Dir,
     /// Symlink, hard link, device, fifo ...: never created.
-    Unsupported,
+    Unsupported(&'static str),
 }
 
 struct Item {
@@ -38,58 +40,80 @@ struct Item {
     kind: Kind,
 }
 
+type Visit<'a> = dyn FnMut(Item, &mut dyn Read, &mut dyn JobCtl) -> Result<Flow, ArchiveError> + 'a;
+
 enum Flow {
     Next,
     /// The data stream failed inside this entry; nothing after it can be read.
     Broken,
 }
 
-/// Counts what the tar reader consumed and remembers the last block, so that the
-/// end-of-archive marker can be checked afterwards.
-struct Probe<R> {
-    inner: R,
-    pos: u64,
-    tail: Vec<u8>,
+/// Largest GNU long-name/link or PAX record that is read into memory.
+const MAX_RECORD: u64 = 1024 * 1024;
+
+/// A `JobCtl` that never cancels, for listing.
+struct NoCtl;
+
+impl JobCtl for NoCtl {
+    fn progress(&mut self, _: &str, _: u64, _: u64) {}
+    fn cancelled(&self) -> bool {
+        false
+    }
+    fn resolve_conflict(&mut self, _: &Path) -> super::ConflictChoice {
+        super::ConflictChoice::Cancel
+    }
 }
 
-impl<R: Read> Read for Probe<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.pos += n as u64;
-        let got = &buf[..n];
-        if got.len() >= BLOCK as usize {
-            self.tail = got[got.len() - BLOCK as usize..].to_vec();
-        } else {
-            self.tail.extend_from_slice(got);
-            if self.tail.len() > BLOCK as usize {
-                let cut = self.tail.len() - BLOCK as usize;
-                self.tail.drain(..cut);
+/// Reads up to `buf.len()` bytes, stopping early only at the end of input.
+fn read_full(r: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
+}
+
+/// Looks up `key` in a PAX record block (`<len> key=value\n` repeated).
+fn pax_lookup(data: &[u8], key: &str) -> Result<Option<Vec<u8>>, String> {
+    let mut found = None;
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sp = rest
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or("bad pax record")?;
+        let len: usize = std::str::from_utf8(&rest[..sp])
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or("bad pax record length")?;
+        if len <= sp + 1 || len > rest.len() {
+            return Err("bad pax record length".into());
+        }
+        let rec = &rest[sp + 1..len];
+        let rec = rec.strip_suffix(b"\n").unwrap_or(rec);
+        if let Some(eq) = rec.iter().position(|&b| b == b'=') {
+            if &rec[..eq] == key.as_bytes() {
+                found = Some(rec[eq + 1..].to_vec());
             }
         }
-        Ok(n)
+        rest = &rest[len..];
     }
+    Ok(found)
 }
 
-/// Limits an entry to its declared size; a stream that ends earlier is an error
-/// (the tar reader reports a plain end of data instead).
-struct Exact<'a> {
-    inner: &'a mut dyn Read,
-    left: u64,
-}
-
-impl Read for Exact<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.left == 0 {
-            return Ok(0);
-        }
-        let max = buf.len().min(self.left.min(usize::MAX as u64) as usize);
-        let n = self.inner.read(&mut buf[..max])?;
-        if n == 0 {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
-        self.left -= n as u64;
-        Ok(n)
-    }
+fn header_checksum_ok(block: &[u8; 512], h: &tar::Header) -> bool {
+    let sum: u32 = block[..148]
+        .iter()
+        .chain(&block[156..])
+        .map(|&b| b as u32)
+        .sum::<u32>()
+        + 8 * 32;
+    h.cksum().is_ok_and(|c| c == sum)
 }
 
 impl TarLikeEngine {
@@ -160,86 +184,217 @@ impl TarLikeEngine {
     }
 
     /// Streams the tar once and calls `visit` for each entry with its data reader.
+    /// The headers are parsed here (not by the `tar` crate's iterator) so that long-name
+    /// and PAX records stay bounded and sparse entries are measured by their on-disk size.
+    /// Data the visitor leaves unread is read and dropped, polling cancel.
     /// `Ok(Some(msg))` means the stream itself is damaged (bad header, decoder
     /// failure, cut off, no end-of-archive marker).
     fn stream(
         &self,
-        visit: &mut dyn FnMut(Item, &mut dyn Read) -> Result<Flow, ArchiveError>,
+        ctl: &mut dyn JobCtl,
+        visit: &mut Visit,
     ) -> Result<Option<String>, ArchiveError> {
-        let mut probe = Probe {
-            inner: self.decoder()?,
-            pos: 0,
-            tail: Vec::new(),
-        };
-        let mut next_header = 0u64;
-        {
-            let mut ar = tar::Archive::new(&mut probe);
-            let entries = match ar.entries() {
-                Ok(e) => e,
-                Err(e) => return Ok(Some(e.to_string())),
+        let mut probe = self.decoder()?;
+        let r: &mut dyn Read = &mut probe;
+        macro_rules! bail {
+            ($e:expr) => {
+                return Ok(Some($e.to_string()))
             };
-            for item in entries {
-                let mut entry = match item {
-                    Ok(e) => e,
-                    Err(e) => return Ok(Some(e.to_string())),
-                };
-                let size = entry.size();
-                next_header = entry.raw_file_position() + size.div_ceil(BLOCK) * BLOCK;
-                let ty = entry.header().entry_type();
-                if matches!(ty, EntryType::XGlobalHeader) {
-                    continue;
+        }
+        let mut long_name: Option<Vec<u8>> = None;
+        let mut long_link = false;
+        let mut pax: Option<Vec<u8>> = None;
+        let mut block = [0u8; BLOCK as usize];
+        loop {
+            if ctl.cancelled() {
+                return Err(ArchiveError::Cancelled);
+            }
+            let n = match read_full(r, &mut block) {
+                Ok(n) => n,
+                Err(e) => bail!(e),
+            };
+            if n == 0 {
+                bail!("archive is truncated (no end-of-archive marker)");
+            }
+            if n < block.len() {
+                bail!("archive is truncated (partial header)");
+            }
+            if block.iter().all(|&b| b == 0) {
+                break;
+            }
+            let h = tar::Header::from_byte_slice(&block);
+            if !header_checksum_ok(&block, h) {
+                bail!("archive header checksum mismatch");
+            }
+            let ty = h.entry_type();
+            let mut size = match h.entry_size() {
+                Ok(s) => s,
+                Err(e) => bail!(e),
+            };
+            if matches!(
+                ty,
+                EntryType::GNULongName | EntryType::GNULongLink | EntryType::XHeader
+            ) {
+                if size > MAX_RECORD {
+                    bail!("oversized long-name or extended header record");
                 }
-                let kind = match ty {
-                    EntryType::Directory => Kind::Dir,
-                    EntryType::Regular | EntryType::Continuous => Kind::File,
-                    _ => Kind::Unsupported,
+                let mut data = vec![0u8; size as usize];
+                let pad = (BLOCK - size % BLOCK) % BLOCK;
+                if let Err(e) = r.read_exact(&mut data) {
+                    bail!(e);
+                }
+                let mut padding = Exact {
+                    inner: r,
+                    left: pad,
                 };
-                let raw = entry.path_bytes();
-                let path = normalize_entry_path(&String::from_utf8_lossy(&raw))
-                    .trim_end_matches('/')
-                    .to_string();
-                let item = Item {
-                    entry: Entry {
-                        path,
-                        is_dir: kind == Kind::Dir,
-                        size: if kind == Kind::File { size } else { 0 },
-                        packed: None,
-                        modified: entry.header().mtime().ok().map(|t| t as i64),
-                        crc: None,
-                        encrypted: false,
+                if let Err(e) = skip_stream(&mut padding, "", ctl) {
+                    match e {
+                        ArchiveError::Cancelled => return Err(e),
+                        e => bail!(e),
+                    }
+                }
+                match ty {
+                    EntryType::GNULongName => {
+                        if long_name.is_some() {
+                            bail!("two long name entries describing the same member");
+                        }
+                        while data.last() == Some(&0) {
+                            data.pop();
+                        }
+                        long_name = Some(data);
+                    }
+                    EntryType::GNULongLink => {
+                        if long_link {
+                            bail!("two long link entries describing the same member");
+                        }
+                        long_link = true;
+                    }
+                    _ => {
+                        if pax.is_some() {
+                            bail!("two pax extension entries describing the same member");
+                        }
+                        pax = Some(data);
+                    }
+                }
+                continue;
+            }
+            // Sparse entries carry extension blocks before their data.
+            let sparse = ty.is_gnu_sparse();
+            let mut shown_size = size;
+            if sparse {
+                if let Some(g) = h.as_gnu() {
+                    shown_size = g.real_size().unwrap_or(size);
+                    let mut ext = g.is_extended();
+                    while ext {
+                        if ctl.cancelled() {
+                            return Err(ArchiveError::Cancelled);
+                        }
+                        let mut eb = [0u8; BLOCK as usize];
+                        match read_full(r, &mut eb) {
+                            Ok(n) if n == eb.len() => {}
+                            Ok(_) => bail!("archive is truncated (sparse header)"),
+                            Err(e) => bail!(e),
+                        }
+                        ext = eb[504] == 1;
+                    }
+                }
+            }
+            let raw_name = pax.as_deref().map(|p| pax_lookup(p, "path")).transpose();
+            let raw_name = match raw_name {
+                Ok(v) => v.flatten(),
+                Err(e) => bail!(e),
+            };
+            if let Some(p) = pax.as_deref() {
+                // A PAX size overrides the header size.
+                match pax_lookup(p, "size") {
+                    Ok(Some(v)) => {
+                        match std::str::from_utf8(&v).ok().and_then(|s| s.parse().ok()) {
+                            Some(s) => size = s,
+                            None => bail!("bad pax size"),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => bail!(e),
+                }
+            }
+            let name_bytes = raw_name
+                .or_else(|| long_name.take())
+                .unwrap_or_else(|| h.path_bytes().into_owned());
+            long_name = None;
+            long_link = false;
+            pax = None;
+            let dir_by_name = ty == EntryType::Regular && size == 0 && name_bytes.ends_with(b"/");
+            let kind = match ty {
+                EntryType::Directory => Kind::Dir,
+                _ if dir_by_name => Kind::Dir,
+                EntryType::Regular | EntryType::Continuous => Kind::File,
+                EntryType::Symlink | EntryType::Link => Kind::Unsupported("link"),
+                EntryType::GNUSparse => Kind::Unsupported("sparse file"),
+                EntryType::Char | EntryType::Block => Kind::Unsupported("device file"),
+                EntryType::Fifo => Kind::Unsupported("fifo"),
+                EntryType::XGlobalHeader => Kind::Unsupported("global header"),
+                _ => Kind::Unsupported("special entry"),
+            };
+            let path = normalize_entry_path(&String::from_utf8_lossy(&name_bytes))
+                .trim_end_matches('/')
+                .to_string();
+            let global = ty == EntryType::XGlobalHeader;
+            let item = Item {
+                entry: Entry {
+                    path,
+                    is_dir: kind == Kind::Dir,
+                    size: match kind {
+                        Kind::File => size,
+                        Kind::Unsupported(_) if sparse => shown_size,
+                        _ => 0,
                     },
-                    kind,
-                };
-                let mut data = Exact {
-                    inner: &mut entry,
-                    left: if kind == Kind::File { size } else { 0 },
-                };
-                match visit(item, &mut data)? {
+                    packed: None,
+                    modified: h.mtime().ok().map(|t| t as i64),
+                    crc: None,
+                    encrypted: false,
+                },
+                kind,
+            };
+            let mut data = Exact {
+                inner: r,
+                left: size,
+            };
+            if !global {
+                match visit(item, &mut data, ctl)? {
                     Flow::Next => {}
                     Flow::Broken => return Ok(None),
                 }
             }
+            // Whatever the visitor left, and the padding up to the next header.
+            match skip_stream(&mut data, "", ctl) {
+                Ok(()) => {}
+                Err(ArchiveError::Cancelled) => return Err(ArchiveError::Cancelled),
+                Err(e) => bail!(e),
+            }
+            let mut padding = Exact {
+                inner: r,
+                left: (BLOCK - size % BLOCK) % BLOCK,
+            };
+            match skip_stream(&mut padding, "", ctl) {
+                Ok(()) => {}
+                Err(ArchiveError::Cancelled) => return Err(ArchiveError::Cancelled),
+                Err(e) => bail!(e),
+            }
         }
-        // The reader stops at the first all-zero block, or at a plain end of input.
-        let at_end = probe.pos;
-        let zero_block = at_end == next_header + BLOCK
-            && probe.tail.len() == BLOCK as usize
-            && probe.tail.iter().all(|&b| b == 0);
+        if long_name.is_some() || long_link || pax.is_some() {
+            bail!("members found describing a future member but no future member found");
+        }
         // Read the rest so that a decoder checksum or a cut trailer is noticed.
-        if let Err(e) = io::copy(&mut probe, &mut io::sink()) {
-            return Ok(Some(e.to_string()));
+        match skip_stream(r, "", ctl) {
+            Ok(()) => Ok(None),
+            Err(ArchiveError::Cancelled) => Err(ArchiveError::Cancelled),
+            Err(e) => Ok(Some(e.to_string())),
         }
-        if !zero_block {
-            return Ok(Some(
-                "archive is truncated (no end-of-archive marker)".into(),
-            ));
-        }
-        Ok(None)
     }
 
     fn list_tar(&self) -> Result<Vec<Entry>, ArchiveError> {
         let mut out = Vec::new();
-        let bad = self.stream(&mut |item, _| {
+        let bad = self.stream(&mut NoCtl, &mut |item, _, _| {
             if !item.entry.path.is_empty() {
                 out.push(item.entry);
             }
@@ -263,7 +418,7 @@ impl TarLikeEngine {
             .unwrap_or(0);
         let mut report = OpReport::default();
         let mut done = 0u64;
-        let bad = self.stream(&mut |item, data| {
+        let bad = self.stream(ctl, &mut |item, data, ctl| {
             if ctl.cancelled() {
                 return Err(ArchiveError::Cancelled);
             }
@@ -278,9 +433,9 @@ impl TarLikeEngine {
                     error,
                 });
             };
-            if item.kind == Kind::Unsupported {
+            if let Kind::Unsupported(what) = item.kind {
                 if req.is_some() {
-                    fail(ArchiveError::Unsupported("link".into()));
+                    fail(ArchiveError::Unsupported(what.into()));
                 }
                 return Ok(Flow::Next);
             }
@@ -608,6 +763,239 @@ mod tests {
         assert_eq!((info.format, es[0].path.as_str()), (Format::Xz, "b.txt"));
     }
 
+    fn header_bytes(ty: u8, name: &str, size: u64) -> Vec<u8> {
+        let mut h = ::tar::Header::new_gnu();
+        {
+            let o = h.as_old_mut();
+            o.name[..name.len()].copy_from_slice(name.as_bytes());
+        }
+        h.set_mode(0o644);
+        h.set_size(size);
+        h.set_mtime(1);
+        h.set_entry_type(::tar::EntryType::new(ty));
+        h.set_cksum();
+        h.as_bytes().to_vec()
+    }
+
+    fn padded(mut v: Vec<u8>) -> Vec<u8> {
+        v.resize(v.len().div_ceil(512) * 512, 0);
+        v
+    }
+
+    fn long_name(name: &str) -> Vec<u8> {
+        let mut data = name.as_bytes().to_vec();
+        data.push(0);
+        let mut t = header_bytes(b'L', "././@LongLink", data.len() as u64);
+        t.extend(padded(data));
+        t
+    }
+
+    fn pax(records: &str) -> Vec<u8> {
+        let mut t = header_bytes(b'x', "PaxHeaders/x", records.len() as u64);
+        t.extend(padded(records.as_bytes().to_vec()));
+        t
+    }
+
+    fn pax_record(key: &str, value: &str) -> String {
+        let body = format!(" {key}={value}\n");
+        let mut len = body.len() + 1;
+        while len.to_string().len() + body.len() != len {
+            len = len.to_string().len() + body.len();
+        }
+        format!("{len}{body}")
+    }
+
+    #[test]
+    fn long_name_records_are_honoured_and_cannot_traverse() {
+        let long = format!("{}/deep.txt", "d".repeat(150));
+        let t = [
+            long_name("../long-evil.txt"),
+            file("short1", b"LONG"),
+            pax(&pax_record("path", "../pax-evil.txt")),
+            file("short2", b"PAX"),
+            long_name(&long),
+            file("short3", b"OK"),
+            pax(&pax_record("path", "viapax/ok.txt")),
+            file("short4", b"OK2"),
+            file("fine.txt", b"fine"),
+        ]
+        .concat();
+        let t = tar_of(&[t], 2);
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.tar", &t);
+        let es = TarLikeEngine::new(&a, Format::Tar).list(None).unwrap().1;
+        let names: Vec<_> = es.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(names[0], "../long-evil.txt");
+        assert_eq!(names[1], "../pax-evil.txt");
+        assert_eq!(names[2], long);
+        assert_eq!(names[3], "viapax/ok.txt");
+        let out = dir.path().join("x/y/out");
+        let rep = TarLikeEngine::new(&a, Format::Tar)
+            .extract(None, &req(&out), &mut ctl())
+            .unwrap();
+        let bad: Vec<_> = rep.failed.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(bad, ["../long-evil.txt", "../pax-evil.txt"]);
+        assert!(rep.failed.iter().all(|f| f.error.code() == "unsafe_path"));
+        assert_eq!(rep.ok, 3);
+        assert_eq!(fs::read(out.join(&long)).unwrap(), b"OK");
+        assert_eq!(fs::read(out.join("viapax/ok.txt")).unwrap(), b"OK2");
+        assert!(!dir.path().join("x/y/long-evil.txt").exists());
+        assert!(!dir.path().join("x/y/pax-evil.txt").exists());
+    }
+
+    #[test]
+    fn oversized_long_name_or_pax_record_is_rejected() {
+        let over = 1024 * 1024 + 1;
+        for ty in *b"LKx" {
+            let mut t = header_bytes(ty, "x", over);
+            t.extend(padded(vec![b'a'; over as usize]));
+            t.extend(file("a.txt", b"x"));
+            let t = tar_of(&[t], 2);
+            let dir = tempfile::tempdir().unwrap();
+            let a = write(dir.path(), "a.tar", &t);
+            let l = TarLikeEngine::new(&a, Format::Tar).list(None);
+            assert!(
+                matches!(l, Err(ArchiveError::Corrupt(_))),
+                "{}: {l:?}",
+                ty as char
+            );
+            let r = TarLikeEngine::new(&a, Format::Tar).test(None, &mut ctl());
+            assert!(is_corrupt(&r), "{}: {r:?}", ty as char);
+        }
+        // a declared size far beyond the file is rejected the same way
+        let mut t = header_bytes(b'L', "x", 1 << 40);
+        t.extend(file("a.txt", b"x"));
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "b.tar", &tar_of(&[t], 2));
+        assert!(matches!(
+            TarLikeEngine::new(&a, Format::Tar).list(None),
+            Err(ArchiveError::Corrupt(_))
+        ));
+    }
+
+    fn sparse_entry(extended: bool) -> Vec<u8> {
+        let mut h = ::tar::Header::new_gnu();
+        h.set_path("sparse.bin").unwrap();
+        h.set_mode(0o644);
+        h.set_entry_type(::tar::EntryType::GNUSparse);
+        h.set_size(512);
+        {
+            let g = h.as_gnu_mut().unwrap();
+            g.realsize.copy_from_slice(b"00000010000\0");
+            g.sparse[0].offset.copy_from_slice(b"00000000000\0");
+            g.sparse[0].numbytes.copy_from_slice(b"00000001000\0");
+            if extended {
+                g.isextended[0] = 1;
+            }
+        }
+        h.set_cksum();
+        let mut s = h.as_bytes().to_vec();
+        if extended {
+            s.extend(vec![0u8; 512]);
+        }
+        s.extend(vec![b's'; 512]);
+        s
+    }
+
+    #[test]
+    fn sparse_entry_is_not_a_truncation() {
+        for extended in [false, true] {
+            for last in [true, false] {
+                let (a1, s) = (file("a.txt", b"a"), sparse_entry(extended));
+                let t = if last { [a1, s] } else { [s, a1] };
+                let t = tar_of(&t, 2);
+                let dir = tempfile::tempdir().unwrap();
+                let a = write(dir.path(), "a.tar", &t);
+                let name = format!("ext={extended} last={last}");
+                let es = TarLikeEngine::new(&a, Format::Tar).list(None);
+                assert_eq!(es.map(|x| x.1.len()).ok(), Some(2), "{name}");
+                let rep = TarLikeEngine::new(&a, Format::Tar)
+                    .test(None, &mut ctl())
+                    .unwrap();
+                assert!(rep.failed.is_empty(), "{name}: {:?}", rep.failed);
+                let out = dir.path().join("out");
+                let rep = TarLikeEngine::new(&a, Format::Tar)
+                    .extract(None, &req(&out), &mut ctl())
+                    .unwrap();
+                assert_eq!(rep.ok, 1, "{name}");
+                assert_eq!(rep.failed.len(), 1, "{name}");
+                assert_eq!(rep.failed[0].path, "sparse.bin");
+                assert!(
+                    matches!(&rep.failed[0].error, ArchiveError::Unsupported(m) if m.contains("sparse"))
+                );
+                assert_eq!(leftovers(&out), ["a.txt"]);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_reason_is_accurate() {
+        let t = tar_of(
+            &[
+                raw_entry("l", Kind::Symlink, b"", "x"),
+                header_bytes(b'6', "fifo", 0),
+                header_bytes(b'3', "dev", 0),
+                header_bytes(b'V', "label", 0),
+            ],
+            2,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.tar", &t);
+        let rep = TarLikeEngine::new(&a, Format::Tar)
+            .extract(None, &req(&dir.path().join("o")), &mut ctl())
+            .unwrap();
+        let msg = |p: &str| match &rep.failed.iter().find(|f| f.path == p).unwrap().error {
+            ArchiveError::Unsupported(m) => m.clone(),
+            e => panic!("{e:?}"),
+        };
+        assert_eq!(msg("l"), "link");
+        assert!(msg("fifo").contains("fifo"));
+        assert!(msg("dev").contains("device"));
+        assert!(!msg("label").contains("link"));
+    }
+
+    #[test]
+    fn cancel_is_polled_while_skipping_unselected_data() {
+        use crate::engine::PollCtl;
+        let big = vec![9u8; 8 * 1024 * 1024];
+        let tar = tar_of(&[file("big.bin", &big), file("z.txt", b"z")], 2);
+        for f in [Format::Tar, Format::TarGz] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = write(dir.path(), "a.tar", &pack(f, &tar));
+            let mut rq = req(&dir.path().join("o"));
+            rq.selection = vec!["z.txt".into()];
+            // runs to the end: many polls while the 8 MiB entry is skipped
+            let mut c = PollCtl {
+                calls: std::cell::Cell::new(0),
+                cancel_at: u64::MAX,
+            };
+            let rep = TarLikeEngine::new(&a, f)
+                .extract(None, &rq, &mut c)
+                .unwrap();
+            assert!(rep.failed.is_empty());
+            assert!(c.calls.get() >= 100, "{f:?}: {}", c.calls.get());
+            // and cancel stops it inside the skipped entry
+            let mut c = PollCtl {
+                calls: std::cell::Cell::new(0),
+                cancel_at: 20,
+            };
+            let r = TarLikeEngine::new(&a, f).extract(None, &rq, &mut c);
+            assert!(matches!(r, Err(ArchiveError::Cancelled)), "{f:?}: {r:?}");
+            // the drain after the terminator polls too
+            let t = tar_of(&[file("z.txt", b"z")], 2 + 16384);
+            let a = write(dir.path(), "t.tar", &pack(f, &t));
+            let mut c = PollCtl {
+                calls: std::cell::Cell::new(0),
+                cancel_at: 20,
+            };
+            let r = TarLikeEngine::new(&a, f).test(None, &mut c);
+            assert!(
+                matches!(r, Err(ArchiveError::Cancelled)),
+                "{f:?} drain: {r:?}"
+            );
+        }
+    }
+
     #[test]
     fn list_streams_once_and_caches() {
         let dir = tempfile::tempdir().unwrap();
@@ -863,7 +1251,7 @@ mod tests {
             2,
         );
         let full = tar.len();
-        let mut cuts: Vec<usize> = (1..full - 512).step_by(512).collect();
+        let mut cuts: Vec<usize> = (0..full - 512).step_by(512).collect();
         cuts.extend((0..full - 512).step_by(512).map(|c| c + 37));
         cuts.push(full - 1024);
         for f in [Format::Tar, Format::TarGz] {

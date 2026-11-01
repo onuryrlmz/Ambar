@@ -308,6 +308,51 @@ pub fn copy_stream(
     Ok(bytes)
 }
 
+/// Limits a reader to `left` bytes. A stream that ends earlier is an error: some
+/// readers (tar, 7z) pass an inner end of data through as a normal end.
+pub struct Exact<'a> {
+    pub inner: &'a mut dyn Read,
+    pub left: u64,
+}
+
+impl Read for Exact<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            return Ok(0);
+        }
+        let max = buf.len().min(self.left.min(usize::MAX as u64) as usize);
+        let n = self.inner.read(&mut buf[..max])?;
+        if n == 0 {
+            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+        }
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
+/// Forwards cancel and conflict questions but hides progress, for reading data
+/// that is only skipped.
+pub struct Quiet<'a>(pub &'a mut dyn JobCtl);
+
+impl JobCtl for Quiet<'_> {
+    fn progress(&mut self, _current: &str, _done_bytes: u64, _total_bytes: u64) {}
+    fn cancelled(&self) -> bool {
+        self.0.cancelled()
+    }
+    fn resolve_conflict(&mut self, path: &Path) -> ConflictChoice {
+        self.0.resolve_conflict(path)
+    }
+}
+
+/// Reads and discards `src`, polling cancel. Only `Cancelled` and `Corrupt` can come out.
+pub fn skip_stream(
+    src: &mut dyn Read,
+    path: &str,
+    ctl: &mut dyn JobCtl,
+) -> Result<(), ArchiveError> {
+    copy_stream(src, None, path, &mut Quiet(ctl), 0, 0).map(|_| ())
+}
+
 /// Writes one entry's data to `dest` via a temp file. On `Corrupt` the partial
 /// output follows `keep_broken`; cancel, disk and permission errors always remove it.
 pub fn write_entry(

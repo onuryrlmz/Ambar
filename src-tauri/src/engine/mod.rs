@@ -109,7 +109,13 @@ pub fn open_engine(path: &Path) -> Result<Box<dyn ArchiveEngine>, ArchiveError> 
         Format::Rar => Ok(Box::new(rar::RarEngine::new(path))),
         Format::Zip => Ok(Box::new(zip::ZipEngine::new(path))),
         Format::SevenZ => Ok(Box::new(sevenz::SevenZEngine::new(path))),
-        format => Ok(Box::new(tarlike::TarLikeEngine::new(path, format))),
+        format @ (Format::Tar
+        | Format::TarGz
+        | Format::TarBz2
+        | Format::TarXz
+        | Format::Gz
+        | Format::Bz2
+        | Format::Xz) => Ok(Box::new(tarlike::TarLikeEngine::new(path, format))),
     }
 }
 
@@ -131,5 +137,24 @@ impl JobCtl for TestCtl {
     }
     fn resolve_conflict(&mut self, _path: &Path) -> ConflictChoice {
         self.choice
+    }
+}
+
+/// Counts `cancelled()` polls and cancels once `cancel_at` of them were made.
+#[cfg(test)]
+pub struct PollCtl {
+    pub calls: std::cell::Cell<u64>,
+    pub cancel_at: u64,
+}
+
+#[cfg(test)]
+impl JobCtl for PollCtl {
+    fn progress(&mut self, _current: &str, _done_bytes: u64, _total_bytes: u64) {}
+    fn cancelled(&self) -> bool {
+        self.calls.set(self.calls.get() + 1);
+        self.calls.get() >= self.cancel_at
+    }
+    fn resolve_conflict(&mut self, _path: &Path) -> ConflictChoice {
+        ConflictChoice::Overwrite
     }
 }

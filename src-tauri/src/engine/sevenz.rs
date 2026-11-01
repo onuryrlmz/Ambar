@@ -4,7 +4,8 @@
 //! Link attributes are never materialised.
 
 use super::plan::{
-    copy_stream, is_selected, normalize_entry_path, plan_entry, write_entry, PlanOutcome,
+    copy_stream, is_selected, normalize_entry_path, plan_entry, skip_stream, write_entry, Exact,
+    PlanOutcome,
 };
 use super::{
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
@@ -272,20 +273,28 @@ impl Run<'_> {
         if self.ctl.cancelled() {
             return Err(ArchiveError::Cancelled);
         }
-        if entry.path.is_empty()
+        // The crate's reader passes an early end of data through as a normal end, so
+        // every entry is held to the size its header declares.
+        let mut data = Exact {
+            inner: data,
+            left: if entry.is_dir { 0 } else { entry.size },
+        };
+        let unwanted = entry.path.is_empty()
             || m.anti
             || !self
                 .req
-                .is_none_or(|r| is_selected(&entry.path, &r.selection))
-        {
-            return Ok(());
-        }
-        if m.link {
-            if self.req.is_some() {
+                .is_none_or(|r| is_selected(&entry.path, &r.selection));
+        if unwanted || m.link {
+            if m.link && !unwanted && self.req.is_some() {
                 self.fail(&entry.path, ArchiveError::Unsupported("link".into()));
+            }
+            // Read what the crate would skip itself, so that cancel is polled.
+            if let Err(ArchiveError::Cancelled) = skip_stream(&mut data, "", self.ctl) {
+                return Err(ArchiveError::Cancelled);
             }
             return Ok(());
         }
+        let data: &mut dyn Read = &mut data;
         self.ctl.progress(&entry.path, self.done, self.total);
         let (done, total) = (self.done, self.total);
         let result = match self.req {
@@ -717,5 +726,240 @@ mod tests {
         assert!(!dir.path().join("evil.txt").exists());
         let rep = SevenZEngine::new(&a).test(None, &mut ctl()).unwrap();
         assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+    }
+
+    // --- hand-built archives with lying headers ---
+    fn num(n: u64) -> Vec<u8> {
+        let mut first = 0u8;
+        let mut mask = 0x80u8;
+        let mut extra = 0;
+        for i in 0..8 {
+            if n < (1u64 << (7 * (i + 1))) {
+                first |= (n >> (8 * i)) as u8;
+                extra = i;
+                break;
+            }
+            first |= mask;
+            mask >>= 1;
+            extra = i + 1;
+        }
+        let mut o = vec![first];
+        for i in 0..extra {
+            o.push((n >> (8 * i)) as u8);
+        }
+        o
+    }
+
+    /// One file `f.bin`, one block, plain header; the sizes are whatever the caller claims.
+    fn plain7z(
+        pack: &[u8],
+        pack_size: u64,
+        unpack: u64,
+        crc_v: Option<u32>,
+        coder: &[u8],
+    ) -> Vec<u8> {
+        let mut h = vec![1u8, 4, 6];
+        h.extend(num(0));
+        h.extend(num(1));
+        h.push(9);
+        h.extend(num(pack_size));
+        h.push(0);
+        h.extend([7u8, 0x0B]);
+        h.extend(num(1));
+        h.push(0);
+        h.extend(num(1));
+        h.extend(coder);
+        h.push(0x0C);
+        h.extend(num(unpack));
+        if let Some(c) = crc_v {
+            h.extend([0x0A, 1]);
+            h.extend(c.to_le_bytes());
+        }
+        h.push(0);
+        h.extend([8u8, 0]);
+        h.push(0);
+        h.push(5);
+        h.extend(num(1));
+        let name: Vec<u8> = "f.bin\0"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        h.push(0x11);
+        h.extend(num(name.len() as u64 + 1));
+        h.push(0);
+        h.extend(&name);
+        h.push(0);
+        h.push(0);
+        let mut out = b"7z\xBC\xAF\x27\x1C\x00\x04".to_vec();
+        let mut sh = vec![];
+        sh.extend((pack.len() as u64).to_le_bytes());
+        sh.extend((h.len() as u64).to_le_bytes());
+        sh.extend(crc32fast_like(&h).to_le_bytes());
+        out.extend(crc32fast_like(&sh).to_le_bytes());
+        out.extend(&sh);
+        out.extend(pack);
+        out.extend(&h);
+        out
+    }
+
+    fn not_clean(r: &Result<OpReport, ArchiveError>) -> bool {
+        match r {
+            Err(_) => true,
+            Ok(rep) => !rep.failed.is_empty(),
+        }
+    }
+
+    #[test]
+    fn short_entries_are_never_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"0123456789abcdefghij";
+        let c = crc32fast_like(data);
+        let good = plain7z(data, 20, 20, Some(c), &[1, 0]);
+        let a = dir.path().join("good.7z");
+        fs::write(&a, &good).unwrap();
+        let rep = SevenZEngine::new(&a).test(None, &mut ctl()).unwrap();
+        assert!(rep.failed.is_empty(), "control: {:?}", rep.failed);
+        let cases = [
+            ("pack_5_of_20", plain7z(data, 5, 20, Some(c), &[1, 0])),
+            ("unpack_40_data_20", plain7z(data, 20, 40, Some(c), &[1, 0])),
+            (
+                "unpack_2^62",
+                plain7z(data, 20, 1u64 << 62, Some(c), &[1, 0]),
+            ),
+            ("unpack_5_of_20", plain7z(data, 20, 5, Some(c), &[1, 0])),
+        ];
+        for (name, bytes) in cases {
+            let a = dir.path().join(format!("{name}.7z"));
+            fs::write(&a, &bytes).unwrap();
+            let out = dir.path().join(format!("o-{name}"));
+            std::fs::create_dir_all(&out).unwrap();
+            fs::write(out.join("f.bin"), b"precious").unwrap();
+            let t = SevenZEngine::new(&a).test(None, &mut ctl());
+            assert!(not_clean(&t), "{name} test: {t:?}");
+            let x = SevenZEngine::new(&a).extract(None, &req(&out), &mut ctl());
+            assert!(not_clean(&x), "{name} extract: {x:?}");
+            assert_eq!(fs::read(out.join("f.bin")).unwrap(), b"precious", "{name}");
+            assert_eq!(leftovers(&out), ["f.bin"], "{name}");
+        }
+    }
+
+    fn lzma2_content_archive(path: &Path, data: &[u8], password: Option<&'static str>) {
+        build(
+            path,
+            &[("f.bin", data, None)],
+            &Opts {
+                password,
+                encrypt_header: false,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn zeroed_lzma2_control_byte_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let big: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let a = dir.path().join("a.7z");
+        lzma2_content_archive(&a, &big, None);
+        let mut b = fs::read(&a).unwrap();
+        b[32] = 0;
+        let c = dir.path().join("c.7z");
+        fs::write(&c, &b).unwrap();
+        let t = SevenZEngine::new(&c).test(None, &mut ctl());
+        assert!(has_corrupt(&t), "{t:?}");
+        let out = dir.path().join("o");
+        let x = SevenZEngine::new(&c).extract(None, &req(&out), &mut ctl());
+        assert!(has_corrupt(&x), "{x:?}");
+        assert!(leftovers(&out).is_empty());
+    }
+
+    #[test]
+    fn wrong_password_is_never_success_and_never_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let a = dir.path().join("a.7z");
+        lzma2_content_archive(&a, &data, Some("right"));
+        let out = dir.path().join("out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("f.bin"), b"precious").unwrap();
+        for i in 0..3000 {
+            let bad = pw(&format!("wrong{i}"));
+            let r = SevenZEngine::new(&a).test(Some(&bad), &mut ctl());
+            assert!(
+                matches!(r, Err(ArchiveError::WrongPassword)),
+                "test {i}: {r:?}"
+            );
+            if i % 5 == 0 {
+                let r = SevenZEngine::new(&a).extract(Some(&bad), &req(&out), &mut ctl());
+                assert!(
+                    matches!(r, Err(ArchiveError::WrongPassword)),
+                    "extract {i}: {r:?}"
+                );
+                assert_eq!(fs::read(out.join("f.bin")).unwrap(), b"precious", "{i}");
+                assert_eq!(leftovers(&out), ["f.bin"]);
+            }
+        }
+        let rep = SevenZEngine::new(&a)
+            .extract(Some(&pw("right")), &req(&out), &mut ctl())
+            .unwrap();
+        assert!(rep.failed.is_empty());
+        assert_eq!(fs::read(out.join("f.bin")).unwrap(), data);
+    }
+
+    #[test]
+    fn cancel_is_polled_while_skipping_unselected_solid_data() {
+        use crate::engine::PollCtl;
+        use ::sevenz_rust2::SourceReader;
+        let dir = tempfile::tempdir().unwrap();
+        let big = vec![9u8; 8 * 1024 * 1024];
+        let s = dir.path().join("s.7z");
+        let mut w = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        w.set_content_methods(vec![EncoderMethod::LZMA2.into()]);
+        w.push_archive_entries(
+            vec![
+                ArchiveEntry::new_file("big.bin"),
+                ArchiveEntry::new_file("z.txt"),
+            ],
+            vec![
+                SourceReader::new(Cursor::new(big)),
+                SourceReader::new(Cursor::new(b"z".to_vec())),
+            ],
+        )
+        .unwrap();
+        fs::write(&s, w.finish().unwrap().into_inner()).unwrap();
+        let mut rq = req(&dir.path().join("o"));
+        rq.selection = vec!["z.txt".into()];
+        let mut c = PollCtl {
+            calls: std::cell::Cell::new(0),
+            cancel_at: u64::MAX,
+        };
+        let rep = SevenZEngine::new(&s).extract(None, &rq, &mut c).unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+        assert!(c.calls.get() >= 100, "{}", c.calls.get());
+        let mut c = PollCtl {
+            calls: std::cell::Cell::new(0),
+            cancel_at: 20,
+        };
+        let r = SevenZEngine::new(&s).extract(None, &rq, &mut c);
+        assert!(matches!(r, Err(ArchiveError::Cancelled)), "{r:?}");
+    }
+
+    #[test]
+    fn deflate_and_bzip2_methods_open() {
+        for method in [EncoderMethod::DEFLATE, EncoderMethod::BZIP2] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("a.7z");
+            let mut w = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+            w.set_content_methods(vec![method.into()]);
+            w.push_archive_entry(ArchiveEntry::new_file("f.txt"), Some(&b"deflated data"[..]))
+                .unwrap();
+            fs::write(&a, w.finish().unwrap().into_inner()).unwrap();
+            let out = dir.path().join("out");
+            let rep = SevenZEngine::new(&a)
+                .extract(None, &req(&out), &mut ctl())
+                .unwrap();
+            assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+            assert_eq!(fs::read(out.join("f.txt")).unwrap(), b"deflated data");
+        }
     }
 }
