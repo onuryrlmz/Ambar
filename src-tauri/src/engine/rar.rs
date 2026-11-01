@@ -1013,7 +1013,7 @@ mod tests {
             for e in fs::read_dir(dir).unwrap() {
                 let e = e.unwrap();
                 let p = e.path();
-                out.push(p.strip_prefix(root).unwrap().to_string_lossy().into_owned());
+                out.push(crate::engine::plan::rel_slash(&p, root));
                 if fs::symlink_metadata(&p).unwrap().is_dir() {
                     go(&p, root, out);
                 }

@@ -440,6 +440,18 @@ pub fn write_entry(
     })
 }
 
+/// Test helper: `p` relative to `root`, with `/` between components on every platform
+/// (entry paths use `/`; Windows would print `\`).
+#[cfg(test)]
+pub fn rel_slash(p: &Path, root: &Path) -> String {
+    p.strip_prefix(root)
+        .unwrap()
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

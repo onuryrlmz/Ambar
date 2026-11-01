@@ -711,7 +711,7 @@ mod tests {
                 if m.is_dir() {
                     go(&p, root, out);
                 } else {
-                    out.push(p.strip_prefix(root).unwrap().to_string_lossy().into_owned());
+                    out.push(crate::engine::plan::rel_slash(&p, root));
                 }
             }
         }

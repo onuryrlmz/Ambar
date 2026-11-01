@@ -1,0 +1,10 @@
+# UnRAR (vendored C++ in unrar-ng-sys, built with the `cc` crate) reports every error,
+# including a cancel from our progress callback, by throwing a C++ exception. MSVC only
+# runs destructors during that unwind with /EHsc, and `cc` does not pass it. Without it
+# the output file object is never destroyed, its handle stays open for the life of the
+# process, and the half-written temp file can neither be deleted nor renamed.
+# Only the Windows MSVC targets read these variables; other platforms are unaffected.
+[env]
+CXXFLAGS_x86_64_pc_windows_msvc = "/EHsc"
+CXXFLAGS_aarch64_pc_windows_msvc = "/EHsc"
+CXXFLAGS_i686_pc_windows_msvc = "/EHsc"
