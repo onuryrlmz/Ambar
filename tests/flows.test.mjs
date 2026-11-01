@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  describeOpenFailures, extractTarget, goUpFlow, openEntryWithPrompts, openLocalWithPrompt, openWithPassword, pathsEqual,
+  localFileGoesToItsApp, describeOpenFailures, extractTarget, goUpFlow, openEntryWithPrompts, openLocalWithPrompt, openWithPassword, pathsEqual,
   progressView, runJob, safeName, safeText, summarizeDone, summarizeReport, toArchiveError,
 } from "../src/lib/flows.ts";
 import { readFileSync } from "node:fs";
@@ -623,4 +623,12 @@ test("goUp reports a failed lookup, unless a newer navigation took over", async 
   assert.deepEqual(fails, ["io"]);
   await goUpFlow("/a", seq, deps(true));
   assert.deepEqual(fails, ["io"]);
+});
+
+test("a file named like an archive is never handed to its app when it is not one", () => {
+  assert.equal(localFileGoesToItsApp("sahte.rar", "not_archive"), false);
+  assert.equal(localFileGoesToItsApp("SAHTE.ZIP", "not_archive"), false);
+  assert.equal(localFileGoesToItsApp("belge.txt", "not_archive"), true);
+  assert.equal(localFileGoesToItsApp("bozuk.rar", "corrupt"), false);
+  assert.equal(localFileGoesToItsApp("belge.txt", undefined), false);
 });

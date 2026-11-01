@@ -8,7 +8,7 @@ import {
   setProgressEvent, showResult, type ProgressState,
 } from "./dialogs/store.svelte.ts";
 import {
-  extractTarget, openEntryWithPrompts, openLocalWithPrompt, pathsEqual, runJob, safeName, toArchiveError, type JobSummary,
+  extractTarget, localFileGoesToItsApp, openEntryWithPrompts, openLocalWithPrompt, pathsEqual, runJob, safeName, toArchiveError, type JobSummary,
   type OpenFailure,
 } from "./flows.ts";
 import { localView, refreshLocal } from "./local.svelte.ts";
@@ -115,7 +115,7 @@ export async function openLocalFile(path: string): Promise<boolean> {
   setOpenFailures([]);
   const name = baseName(path);
   const r = await openTab(path);
-  if (r.failure?.code !== "not_archive") {
+  if (!localFileGoesToItsApp(name, r.failure?.code)) {
     if (r.failure) setOpenFailures([r.failure]);
     return r.showing;
   }

@@ -4,7 +4,7 @@
 //! file via `write_via_temp`.
 
 use super::plan::{
-    copy_stream, is_selected, normalize_entry_path, plan_entry, write_via_temp, PlanOutcome,
+    copy_stream, normalize_entry_path, plan_entry, write_via_temp, PlanOutcome, Selection,
 };
 use super::{
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
@@ -91,7 +91,8 @@ impl ZipEngine {
     ) -> Result<OpReport, ArchiveError> {
         let mut ar = self.open()?;
         let metas = Self::metas(&mut ar)?;
-        let wanted = |path: &str| req.is_none_or(|r| is_selected(path, &r.selection));
+        let selection = Selection::of(req);
+        let wanted = |path: &str| selection.has(path);
         let total: u64 = metas
             .iter()
             .filter(|m| !m.entry.is_dir && !m.entry.path.is_empty() && wanted(&m.entry.path))

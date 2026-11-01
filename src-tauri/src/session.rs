@@ -1,6 +1,6 @@
 //! Per-run state: confirmed passwords (memory only) and temp folders for opened entries.
 
-use crate::engine::plan::{is_selected, normalize_entry_path, output_rel, safe_dest};
+use crate::engine::plan::{normalize_entry_path, output_rel, safe_dest, Selection};
 use crate::engine::{
     ArchiveEngine, ArchiveInfo, ConflictChoice, Entry, ExtractRequest, JobCtl, OpReport,
     OverwritePolicy, Password,
@@ -155,9 +155,10 @@ pub fn confirms_password(entries: &[Entry], selection: &[String], report: &OpRep
     {
         return false;
     }
+    let selection = Selection::new(selection);
     entries
         .iter()
-        .filter(|e| !e.is_dir && e.encrypted && is_selected(&e.path, selection))
+        .filter(|e| !e.is_dir && e.encrypted && selection.has(&e.path))
         .any(|e| !report.failed.iter().any(|f| f.path == e.path))
 }
 

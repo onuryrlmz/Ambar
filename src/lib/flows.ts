@@ -3,7 +3,7 @@
 // injected call: nothing here returns or stores one.
 
 import { safeName } from "./names.ts";
-import { selectedPaths } from "./tabs-core.ts";
+import { isArchiveName, selectedPaths } from "./tabs-core.ts";
 import type {
   ArchiveError, ConflictChoice, ConflictEvent, DoneEvent, FileFailure, OpenResult, OpReport,
   ProgressEvent,
@@ -214,6 +214,14 @@ export async function openEntryWithPrompts(deps: EntryDeps): Promise<ActOutcome>
     }
   }
 }
+
+/**
+ * After `open_archive` on a local file: whether it goes to its default app. Only a plain
+ * non-archive does. Text named `sahte.rar` would otherwise go to whatever handles `.rar`,
+ * and the user asked for an archive, so they hear that it is not one.
+ */
+export const localFileGoesToItsApp = (name: string, code: string | undefined): boolean =>
+  code === "not_archive" && !isArchiveName(name);
 
 /** Opening a local file with its default app. */
 export async function openLocalWithPrompt(deps: {

@@ -3,6 +3,7 @@
 
 use super::{ConflictChoice, Entry, ExtractRequest, JobCtl, OverwritePolicy};
 use crate::error::ArchiveError;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
@@ -114,17 +115,25 @@ pub fn safe_dest(dest_root: &Path, rel: &str) -> Result<PathBuf, ArchiveError> {
     Ok(out)
 }
 
-pub fn is_selected(entry_path: &str, selection: &[String]) -> bool {
-    if selection.is_empty() {
-        return true;
+/// What a job works on: a selected path takes the entries beneath it too. Built once per
+/// job, since a Select All on a huge archive asks about each entry with as many paths.
+pub struct Selection<'a>(HashSet<&'a str>);
+
+impl<'a> Selection<'a> {
+    /// Everything when there is no request or its selection is empty.
+    pub fn of(req: Option<&'a ExtractRequest>) -> Self {
+        Self::new(req.map_or(&[], |r| &r.selection))
     }
-    selection.iter().any(|s| {
-        let s = s.trim_end_matches('/');
-        entry_path == s
-            || entry_path
-                .strip_prefix(s)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
+
+    pub fn new(paths: &'a [String]) -> Self {
+        Self(paths.iter().map(|s| s.trim_end_matches('/')).collect())
+    }
+
+    pub fn has(&self, entry_path: &str) -> bool {
+        self.0.is_empty()
+            || self.0.contains(entry_path)
+            || entry_path.match_indices('/').any(|(i, _)| self.0.contains(&entry_path[..i]))
+    }
 }
 
 /// Path of the entry relative to the destination, or `None` if nothing to write.
@@ -495,17 +504,48 @@ mod tests {
         assert_eq!(sanitize_component("x."), "x_");
     }
 
+    fn selecting(paths: &[&str]) -> ExtractRequest {
+        ExtractRequest {
+            selection: paths.iter().map(|p| p.to_string()).collect(),
+            ..req(Path::new(""), OverwritePolicy::Skip)
+        }
+    }
+
     #[test]
     fn selection_matches_file_and_children() {
-        let sel = vec!["a".to_string()];
-        assert!(is_selected("a", &sel));
-        assert!(is_selected("a/b", &sel));
-        assert!(!is_selected("ab", &sel));
+        let req = selecting(&["a"]);
+        let sel = Selection::of(Some(&req));
+        assert!(sel.has("a"));
+        assert!(sel.has("a/b"));
+        assert!(sel.has("a/b/c/d"));
+        assert!(!sel.has("ab"));
+        assert!(!sel.has("b/a"));
+        let req = selecting(&["x/y/", "ç/😀.txt"]);
+        let sel = Selection::of(Some(&req));
+        assert!(sel.has("x/y"));
+        assert!(sel.has("x/y/z"));
+        assert!(!sel.has("x"));
+        assert!(sel.has("ç/😀.txt"));
     }
 
     #[test]
     fn empty_selection_matches_all() {
-        assert!(is_selected("anything/at/all", &[]));
+        let req = selecting(&[]);
+        assert!(Selection::of(Some(&req)).has("anything/at/all"));
+        assert!(Selection::of(None).has("anything/at/all"));
+    }
+
+    /// Select All on a 100,000-entry archive spent 27 s here, before the first file.
+    #[test]
+    fn a_huge_selection_is_not_quadratic() {
+        let names: Vec<String> = (0..100_000).map(|i| format!("klasor/dosya-{i:06}.txt")).collect();
+        let mut request = req(Path::new(""), OverwritePolicy::Skip);
+        request.selection = names.clone();
+        let start = std::time::Instant::now();
+        let sel = Selection::of(Some(&request));
+        assert!(names.iter().all(|n| sel.has(n)));
+        assert!(!sel.has("klasor/yok.txt"));
+        assert!(start.elapsed().as_secs() < 3, "took {:?}", start.elapsed());
     }
 
     #[test]

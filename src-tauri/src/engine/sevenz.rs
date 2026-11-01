@@ -4,7 +4,7 @@
 //! Link attributes are never materialised.
 
 use super::plan::{
-    copy_stream, is_selected, normalize_entry_path, plan_entry, skip_stream, write_entry, Exact,
+    copy_stream, normalize_entry_path, plan_entry, skip_stream, write_entry, Exact, Selection,
     PlanOutcome,
 };
 use super::{
@@ -171,6 +171,7 @@ impl SevenZEngine {
         let mut run = Run {
             metas: &metas,
             req,
+            selection: Selection::of(req),
             ctl,
             report: OpReport::default(),
             done: 0,
@@ -244,6 +245,7 @@ impl SevenZEngine {
 struct Run<'a> {
     metas: &'a [Meta],
     req: Option<&'a ExtractRequest>,
+    selection: Selection<'a>,
     ctl: &'a mut dyn JobCtl,
     report: OpReport,
     done: u64,
@@ -257,9 +259,7 @@ impl Run<'_> {
         let m = &self.metas[i];
         !m.entry.path.is_empty()
             && !m.anti
-            && self
-                .req
-                .is_none_or(|r| is_selected(&m.entry.path, &r.selection))
+            && self.selection.has(&m.entry.path)
     }
 
     fn fail(&mut self, path: &str, error: ArchiveError) {
@@ -302,9 +302,7 @@ impl Run<'_> {
         } else {
             entry.path.clone()
         };
-        let selected = self
-            .req
-            .is_none_or(|r| is_selected(&entry.path, &r.selection));
+        let selected = self.selection.has(&entry.path);
         let unwanted = entry.path.is_empty() || m.anti || !selected;
         if unwanted || m.link {
             let link_failed = m.link && !unwanted && self.req.is_some();

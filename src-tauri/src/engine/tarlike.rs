@@ -6,7 +6,7 @@
 
 use super::plan::PlanOutcome;
 use super::plan::{
-    copy_stream, is_selected, normalize_entry_path, plan_entry, skip_stream, write_entry, Exact,
+    copy_stream, normalize_entry_path, plan_entry, skip_stream, write_entry, Exact, Selection,
 };
 use super::{
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
@@ -428,13 +428,13 @@ impl TarLikeEngine {
         let total = self.file_total;
         let mut report = OpReport::default();
         let mut done = 0u64;
+        let selection = Selection::of(req);
         let bad = self.stream(ctl, &mut |item, data, ctl| {
             if ctl.cancelled() {
                 return Err(ArchiveError::Cancelled);
             }
             let entry = &item.entry;
-            if entry.path.is_empty() || !req.is_none_or(|r| is_selected(&entry.path, &r.selection))
-            {
+            if entry.path.is_empty() || !selection.has(&entry.path) {
                 return Ok(Flow::Next);
             }
             let mut fail = |error: ArchiveError| {
@@ -508,7 +508,7 @@ impl TarLikeEngine {
     ) -> Result<OpReport, ArchiveError> {
         let entry = self.single_entry();
         let mut report = OpReport::default();
-        if !req.is_none_or(|r| is_selected(&entry.path, &r.selection)) {
+        if !Selection::of(req).has(&entry.path) {
             return Ok(report);
         }
         let mut data = self.decoder()?;

@@ -2,6 +2,7 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { listLocal } from "../api.ts";
   import { safeName, toArchiveError, type ExtractScope } from "../flows.ts";
+  import { formatCount } from "../format.ts";
   import { errorText, t } from "../i18n/index.ts";
   import { baseName } from "../tabs-core.ts";
   import type { OverwritePolicy } from "../types.ts";
@@ -89,7 +90,7 @@
       <legend>{t("extract.scope")}</legend>
       <label class="check">
         <input type="radio" name="scope" value="selected" bind:group={scope} />
-        {t("extract.scopeSelected", { n: selectedCount })}
+        {t("extract.scopeSelected", { n: formatCount(selectedCount) })}
       </label>
       <label class="check">
         <input type="radio" name="scope" value="folder" bind:group={scope} />

@@ -7,7 +7,7 @@
 //! links, file copies) are never extracted: UnRAR would resolve their targets
 //! against the process working directory or create real links.
 
-use super::plan::{is_selected, normalize_entry_path, plan_entry, write_via_temp, PlanOutcome};
+use super::plan::{normalize_entry_path, plan_entry, write_via_temp, PlanOutcome, Selection};
 use super::{
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
     Password,
@@ -498,7 +498,8 @@ impl RarEngine {
     ) -> Result<OpReport, ArchiveError> {
         // Listing first surfaces password problems early and gives the byte total.
         let (_, entries) = self.list_inner(pw)?;
-        let wanted = |path: &str| req.is_none_or(|r| is_selected(path, &r.selection));
+        let selection = Selection::of(req);
+        let wanted = |path: &str| selection.has(path);
         let total: u64 = entries
             .iter()
             .filter(|e| !e.is_dir && wanted(&e.path))
