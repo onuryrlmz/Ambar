@@ -23,6 +23,8 @@ zeroize = "1"
 unicode-normalization = "0.1"
 unrar-ng = "0.7"
 unrar-ng-sys = "0.7"
+zip = { version = "9", default-features = false, features = ["aes-crypto", "deflate", "bzip2", "zstd"] }
+oem_cp = "2"
 
 [dev-dependencies]
 tempfile = "3"

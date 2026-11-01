@@ -1,6 +1,7 @@
 pub mod detect;
 pub mod plan;
 pub mod rar;
+pub mod zip;
 
 use crate::error::ArchiveError;
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,7 @@ pub trait ArchiveEngine: Send {
 pub fn open_engine(path: &Path) -> Result<Box<dyn ArchiveEngine>, ArchiveError> {
     match detect_format(path)? {
         Format::Rar => Ok(Box::new(rar::RarEngine::new(path))),
+        Format::Zip => Ok(Box::new(zip::ZipEngine::new(path))),
         format => Err(ArchiveError::Unsupported(format!("{format:?}"))),
     }
 }
