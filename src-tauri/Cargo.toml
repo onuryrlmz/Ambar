@@ -30,6 +30,7 @@ tar = "0.4"
 flate2 = "1"
 bzip2 = "0.6"
 liblzma = { version = "0.4", features = ["static"] }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

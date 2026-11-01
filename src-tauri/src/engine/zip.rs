@@ -4,7 +4,8 @@
 //! file via `write_via_temp`.
 
 use super::plan::{
-    copy_stream, normalize_entry_path, plan_entry, write_via_temp, PlanOutcome, Selection,
+    copy_stream, normalize_entry_path, plan_entry, stamp_mtime, write_via_temp, PlanOutcome,
+    Selection,
 };
 use super::{
     ArchiveEngine, ArchiveInfo, Entry, ExtractRequest, FileFailure, Format, JobCtl, OpReport,
@@ -66,14 +67,7 @@ impl ZipEngine {
                     is_dir: f.is_dir(),
                     size: f.size(),
                     packed: Some(f.compressed_size()),
-                    modified: f.last_modified().map(|d| {
-                        let days =
-                            days_from_civil(d.year() as i64, d.month() as i64, d.day() as i64);
-                        days * 86400
-                            + d.hour() as i64 * 3600
-                            + d.minute() as i64 * 60
-                            + d.second() as i64
-                    }),
+                    modified: f.last_modified().and_then(dos_to_epoch),
                     crc: Some(f.crc32()),
                     encrypted: f.encrypted(),
                 },
@@ -169,8 +163,9 @@ impl ZipEngine {
                                     .open(tmp)
                                     .map_err(ArchiveError::from)
                                     .and_then(|mut out| {
-                                        copy(&mut f, Some(&mut out), entry, ctl, done, total)
-                                            .map(|_| ())
+                                        copy(&mut f, Some(&mut out), entry, ctl, done, total)?;
+                                        stamp_mtime(&out, entry.modified);
+                                        Ok(())
                                     });
                                 match r {
                                     Err(ArchiveError::Corrupt(_)) if entry.encrypted => {
@@ -269,14 +264,36 @@ fn decode_name(raw: &[u8]) -> String {
     }
 }
 
-/// Days since 1970-01-01 for a proleptic Gregorian date (DOS times are local; taken as UTC).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+/// DOS fields carry no zone: they are the writer's wall clock, read here as this machine's,
+/// as UnRAR does for RAR4. `tm_isdst = -1` lets the C library decide on summer time.
+fn dos_to_epoch(d: zip::DateTime) -> Option<i64> {
+    // SAFETY: `tm` is plain integers (and a pointer on some systems), for which zero is valid.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = d.year() as i32 - 1900;
+    tm.tm_mon = d.month() as i32 - 1;
+    tm.tm_mday = d.day() as i32;
+    tm.tm_hour = d.hour() as i32;
+    tm.tm_min = d.minute() as i32;
+    tm.tm_sec = d.second() as i32;
+    tm.tm_isdst = -1;
+    let secs = local_to_epoch(&mut tm);
+    // -1 is the failure value, and no DOS time (1980 on) can mean it.
+    (secs != -1).then_some(secs)
+}
+
+#[cfg(unix)]
+fn local_to_epoch(tm: &mut libc::tm) -> i64 {
+    // SAFETY: `tm` is a valid, exclusive reference for the length of the call.
+    unsafe { libc::mktime(tm) as i64 }
+}
+
+#[cfg(windows)]
+fn local_to_epoch(tm: &mut libc::tm) -> i64 {
+    extern "C" {
+        fn _mktime64(tm: *mut libc::tm) -> i64;
+    }
+    // SAFETY: `tm` is a valid, exclusive reference for the length of the call.
+    unsafe { _mktime64(tm) }
 }
 
 impl ArchiveEngine for ZipEngine {
@@ -1035,6 +1052,85 @@ mod tests {
         assert_eq!(r.failed.len(), 1);
         assert!(matches!(r.failed[0].error, ArchiveError::DestConflict(_)));
         assert_eq!(leftovers(&out), ["a", "z.txt"]);
+    }
+
+    fn dated_zip(path: &Path, date: (u16, u8, u8, u8, u8, u8)) {
+        let (y, mo, da, h, mi, se) = date;
+        let when = ::zip::DateTime::from_date_and_time(y, mo, da, h, mi, se).unwrap();
+        let mut w = ZipWriter::new(File::create(path).unwrap());
+        w.start_file("a.txt", stored().last_modified_time(when)).unwrap();
+        w.write_all(b"dated").unwrap();
+        w.finish().unwrap();
+    }
+
+    /// Runs only as the child of `dos_times_follow_the_zone`, with TZ set.
+    #[cfg(unix)]
+    #[test]
+    fn dos_time_child() {
+        let Ok(want) = std::env::var("AMBAR_TEST_WANT_EPOCH") else { return };
+        let m: Vec<u16> = std::env::var("AMBAR_TEST_MONTH_DAY")
+            .unwrap()
+            .split(',')
+            .map(|x| x.parse().unwrap())
+            .collect();
+        let d = tempfile::tempdir().unwrap();
+        let z = d.path().join("a.zip");
+        dated_zip(&z, (2025, m[0] as u8, m[1] as u8, 12, 30, 0));
+        assert_eq!(list(&z)[0].modified, Some(want.parse().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dos_times_follow_the_zone() {
+        // 12:30 on the wall clock, and the instant that is in each zone. The last two tell
+        // summer from winter in the same zone (tm_isdst = -1).
+        for (tz, month_day, want) in [
+            ("Europe/Istanbul", "6,15", 1_749_979_800i64),
+            ("UTC", "6,15", 1_749_990_600),
+            ("America/New_York", "6,15", 1_750_005_000),
+            ("America/New_York", "1,15", 1_736_962_200),
+        ] {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engine::zip::tests::dos_time_child", "--nocapture"])
+                .env("TZ", tz)
+                .env("AMBAR_TEST_WANT_EPOCH", want.to_string())
+                .env("AMBAR_TEST_MONTH_DAY", month_day)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{tz} {month_day}: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+    }
+
+    /// The same components back through the C library, in whatever zone this runs.
+    #[cfg(unix)]
+    #[test]
+    fn dos_time_is_the_local_reading_of_its_fields() {
+        let d = tempfile::tempdir().unwrap();
+        let z = d.path().join("a.zip");
+        dated_zip(&z, (2025, 6, 15, 12, 30, 44));
+        let t = list(&z)[0].modified.unwrap() as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        assert!(!unsafe { libc::localtime_r(&t, &mut tm) }.is_null());
+        assert_eq!(
+            (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec),
+            (2025, 6, 15, 12, 30, 44)
+        );
+    }
+
+    #[test]
+    fn extracted_file_keeps_the_listed_time() {
+        let d = tempfile::tempdir().unwrap();
+        let z = d.path().join("a.zip");
+        dated_zip(&z, (2019, 3, 9, 8, 7, 6));
+        let listed = list(&z)[0].modified.unwrap();
+        let out = d.path().join("out");
+        let r = ZipEngine::new(&z).extract(None, &req(&out), &mut ctl()).unwrap();
+        assert_eq!((r.ok, r.failed.len()), (1, 0));
+        assert_eq!(crate::engine::disk_mtime(&out.join("a.txt")), listed);
     }
 
     #[test]

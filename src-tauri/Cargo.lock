@@ -50,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "bzip2",
  "flate2",
+ "libc",
  "liblzma",
  "oem_cp",
  "serde",

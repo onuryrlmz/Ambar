@@ -142,6 +142,13 @@ impl JobCtl for TestCtl {
     }
 }
 
+/// A file's modification time on disk, in Unix seconds.
+#[cfg(test)]
+pub fn disk_mtime(path: &Path) -> i64 {
+    let t = std::fs::metadata(path).unwrap().modified().unwrap();
+    t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
 /// Counts `cancelled()` polls and cancels once `cancel_at` of them were made.
 #[cfg(test)]
 pub struct PollCtl {

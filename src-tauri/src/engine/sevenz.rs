@@ -366,7 +366,7 @@ impl Run<'_> {
                         &dest,
                         req.keep_broken && !entry.encrypted,
                         data,
-                        &entry.path,
+                        entry,
                         self.ctl,
                         done,
                         total,
@@ -503,6 +503,17 @@ mod tests {
         }
         let c = w.finish().unwrap();
         fs::write(path, c.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn extracted_file_keeps_its_time() {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("a.7z");
+        build(&a, &[("k/a.txt", b"dated", None)], &Opts::default());
+        let out = d.path().join("out");
+        let r = SevenZEngine::new(&a).extract(None, &req(&out), &mut ctl()).unwrap();
+        assert_eq!((r.ok, r.failed.len()), (1, 0));
+        assert_eq!(crate::engine::disk_mtime(&out.join("k/a.txt")), 1_700_000_000);
     }
 
     fn leftovers(root: &Path) -> Vec<String> {

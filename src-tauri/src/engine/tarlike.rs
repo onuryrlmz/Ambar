@@ -474,7 +474,7 @@ impl TarLikeEngine {
                             return Ok(Flow::Next);
                         }
                         PlanOutcome::Write(dest) => {
-                            write_entry(&dest, req.keep_broken, data, &entry.path, ctl, done, total)
+                            write_entry(&dest, req.keep_broken, data, entry, ctl, done, total)
                         }
                     }
                 }
@@ -522,7 +522,7 @@ impl TarLikeEngine {
                 }
                 Ok(PlanOutcome::Nothing) => return Ok(report),
                 Ok(PlanOutcome::Write(dest)) => {
-                    write_entry(&dest, req.keep_broken, &mut data, &entry.path, ctl, 0, 0)
+                    write_entry(&dest, req.keep_broken, &mut data, &entry, ctl, 0, 0)
                 }
                 Err(e @ (ArchiveError::UnsafePath(_) | ArchiveError::DestConflict(_))) => Err(e),
                 Err(e) => return Err(e),
@@ -764,6 +764,37 @@ mod tests {
             let rep = TarLikeEngine::new(&a, f).test(None, &mut ctl()).unwrap();
             assert!(rep.failed.is_empty(), "{f:?} {:?}", rep.failed);
         }
+    }
+
+    #[test]
+    fn extracted_file_keeps_its_time() {
+        for f in TAR_FORMATS {
+            let dir = tempfile::tempdir().unwrap();
+            let a = write(dir.path(), "a.tar", &pack(f, &std_tar()));
+            let out = dir.path().join("out");
+            let rep = TarLikeEngine::new(&a, f).extract(None, &req(&out), &mut ctl()).unwrap();
+            assert!(rep.failed.is_empty(), "{f:?} {:?}", rep.failed);
+            assert_eq!(crate::engine::disk_mtime(&out.join("d/b.txt")), 1_700_000_000, "{f:?}");
+        }
+    }
+
+    /// An mtime from a hostile header is out of range: it costs the date, not the file.
+    #[test]
+    fn absurd_header_time_does_not_fail_the_extraction() {
+        let mut h = ::tar::Header::new_gnu();
+        h.set_path("a.txt").unwrap();
+        h.set_mode(0o644);
+        h.set_size(1);
+        h.set_mtime(u64::MAX);
+        h.set_cksum();
+        let mut e = h.as_bytes().to_vec();
+        e.extend(padded(b"x".to_vec()));
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.tar", &tar_of(&[e], 2));
+        let out = dir.path().join("out");
+        let rep = TarLikeEngine::new(&a, Format::Tar).extract(None, &req(&out), &mut ctl()).unwrap();
+        assert_eq!((rep.ok, rep.failed.len()), (1, 0), "{:?}", rep.failed);
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"x");
     }
 
     #[test]

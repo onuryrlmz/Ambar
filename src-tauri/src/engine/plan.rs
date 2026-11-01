@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -366,13 +367,30 @@ pub fn skip_stream(
     copy_stream(src, None, path, &mut Quiet(ctl), 0, 0).map(|_| ())
 }
 
-/// Writes one entry's data to `dest` via a temp file. On `Corrupt` the partial
-/// output follows `keep_broken`; cancel, disk and permission errors always remove it.
+/// Gives a finished file the time its archive records, in Unix seconds. Called on the
+/// temp file before it is renamed. The date is a courtesy: a value out of range or a
+/// refusal from the filesystem leaves today's date, and the extraction stands.
+pub fn stamp_mtime(file: &File, modified: Option<i64>) {
+    let Some(secs) = modified else { return };
+    let span = Duration::from_secs(secs.unsigned_abs());
+    let when = if secs < 0 {
+        UNIX_EPOCH.checked_sub(span)
+    } else {
+        UNIX_EPOCH.checked_add(span)
+    };
+    if let Some(when) = when {
+        let _ = file.set_modified(when);
+    }
+}
+
+/// Writes one entry's data to `dest` via a temp file and stamps it with the entry's time.
+/// On `Corrupt` the partial output follows `keep_broken`; cancel, disk and permission
+/// errors always remove it.
 pub fn write_entry(
     dest: &Path,
     keep_broken: bool,
     src: &mut dyn Read,
-    path: &str,
+    entry: &Entry,
     ctl: &mut dyn JobCtl,
     done: u64,
     total: u64,
@@ -384,7 +402,9 @@ pub fn write_entry(
             .open(tmp)
             .map_err(ArchiveError::from)
             .and_then(|mut out| {
-                copy_stream(src, Some(&mut out), path, ctl, done, total).map(|_| ())
+                copy_stream(src, Some(&mut out), &entry.path, ctl, done, total)?;
+                stamp_mtime(&out, entry.modified);
+                Ok(())
             });
         match r {
             Err(e @ ArchiveError::Corrupt(_)) => Err(e),
@@ -617,6 +637,37 @@ mod tests {
             Err(ArchiveError::DestConflict(_))
         ));
         assert!(d.path().join("a").is_dir());
+    }
+
+    #[test]
+    fn stamp_mtime_sets_the_time_and_survives_any_value() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a");
+        let f = File::create(&p).unwrap();
+        stamp_mtime(&f, Some(1_600_000_000));
+        assert_eq!(crate::engine::disk_mtime(&p), 1_600_000_000);
+        stamp_mtime(&f, None);
+        assert_eq!(crate::engine::disk_mtime(&p), 1_600_000_000);
+        for secs in [i64::MAX, i64::MIN, -1, i64::MAX / 2, i64::MIN / 2] {
+            stamp_mtime(&f, Some(secs));
+        }
+    }
+
+    #[test]
+    fn broken_output_is_not_given_the_archive_date() {
+        struct Bad;
+        impl Read for Bad {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("damaged"))
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("a");
+        let mut e = file("a");
+        e.modified = Some(1_000_000_000);
+        let r = write_entry(&t, true, &mut Bad, &e, &mut ctl(ConflictChoice::Skip), 0, 0);
+        assert!(matches!(r, Err(ArchiveError::Corrupt(_))));
+        assert!(crate::engine::disk_mtime(&t) > 1_000_000_000);
     }
 
     #[test]
