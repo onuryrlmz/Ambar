@@ -98,6 +98,7 @@ export const en: Record<string, string> = {
   "menu.help": "Help",
   "menu.open": "Open Archive…",
   "menu.closeTab": "Close Tab",
+  "menu.closeWindow": "Close Window",
   "menu.extract": "Extract…",
   "menu.test": "Test",
   "menu.show": "Show",

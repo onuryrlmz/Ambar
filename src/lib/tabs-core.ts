@@ -120,18 +120,21 @@ export function parentOf(cwd: string): string | null {
 const between = (keys: string[], a: number, b: number) =>
   new Set(keys.slice(Math.min(a, b), Math.max(a, b) + 1));
 
+/** Row order, with an index so that per-keypress lookups do not scan the keys. */
+export type RowOrder = Pick<ListModel<unknown>, "keys" | "indexOf">;
+
 /** Applies a click on row `i`: plain replaces, `toggle` flips, `range` extends from the anchor. */
 export function selectClick<V extends PaneView>(
   view: V,
-  keys: string[],
+  order: RowOrder,
   i: number,
   mods: { toggle?: boolean; range?: boolean },
 ): V {
-  const key = keys[i];
+  const key = order.keys[i];
   if (key === undefined) return view;
   if (mods.range) {
-    const from = view.anchor === null ? -1 : keys.indexOf(view.anchor);
-    if (from >= 0) return { ...view, selection: between(keys, from, i), cursor: key };
+    const from = view.anchor === null ? undefined : order.indexOf.get(view.anchor);
+    if (from !== undefined) return { ...view, selection: between(order.keys, from, i), cursor: key };
   } else if (mods.toggle) {
     const selection = new Set(view.selection);
     if (!selection.delete(key)) selection.add(key);
@@ -140,15 +143,34 @@ export function selectClick<V extends PaneView>(
   return { ...view, selection: new Set([key]), cursor: key, anchor: key };
 }
 
+/**
+ * A mouse press on row `i`. A plain press inside a multi-selection keeps it for now, so
+ * a drag can take all of it; `collapseOnRelease` says a release without a drag must then
+ * apply the plain click.
+ */
+export function pressRow<V extends PaneView>(
+  view: V,
+  order: RowOrder,
+  i: number,
+  mods: { toggle?: boolean; range?: boolean },
+): { view: V; collapseOnRelease: boolean } {
+  const key = order.keys[i];
+  if (key !== undefined && !mods.toggle && !mods.range && view.selection.has(key) && view.selection.size > 1) {
+    return { view: { ...view, cursor: key, anchor: key }, collapseOnRelease: true };
+  }
+  return { view: selectClick(view, order, i, mods), collapseOnRelease: false };
+}
+
 /** Keyboard move to row `i` (clamped); `extend` grows the selection from the anchor. */
-export function moveTo<V extends PaneView>(view: V, keys: string[], i: number, extend: boolean): V {
+export function moveTo<V extends PaneView>(view: V, order: RowOrder, i: number, extend: boolean): V {
+  const { keys } = order;
   if (keys.length === 0) return view;
   const idx = Math.min(Math.max(0, i), keys.length - 1);
   const key = keys[idx];
   if (extend) {
     const anchor = view.anchor ?? view.cursor ?? key;
-    const from = keys.indexOf(anchor);
-    if (from >= 0) return { ...view, selection: between(keys, from, idx), cursor: key, anchor };
+    const from = anchor === key ? idx : order.indexOf.get(anchor);
+    if (from !== undefined) return { ...view, selection: between(keys, from, idx), cursor: key, anchor };
   }
   return { ...view, selection: new Set([key]), cursor: key, anchor: key };
 }
@@ -175,7 +197,7 @@ export function pruneSelection<V extends PaneView>(view: V, indexOf: Map<string,
   return { ...view, selection, cursor, anchor };
 }
 
-/** Sorted rows with their keys, so per-keypress lookups do not scan 100,000 rows. */
+/** Sorted rows with their keys. */
 export interface ListModel<R> {
   rows: R[];
   keys: string[];
@@ -268,6 +290,57 @@ const ARCHIVE_NAME = /\.(rar|zip|7z|tar|tgz|tbz2?|txz|gz|bz2|xz)$/i;
 
 /** For the row icon only. Opening goes by the file's content, not its name. */
 export const isArchiveName = (name: string): boolean => ARCHIVE_NAME.test(name);
+
+interface KeyMods {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}
+
+export type KeyCommand =
+  | { kind: "move"; step: 1 | -1; extend: boolean }
+  | { kind: "page"; step: 1 | -1; extend: boolean }
+  | { kind: "edge"; to: "start" | "end"; extend: boolean }
+  | { kind: "open" | "up" | "space" | "all" };
+
+/** What a key does in a file list. A modifier the command has no use for means no command. */
+export function keyCommand(e: KeyMods): KeyCommand | null {
+  const mod = e.metaKey || e.ctrlKey;
+  if (e.altKey) return null;
+  if (mod) {
+    if (e.shiftKey) return null;
+    if (e.key === "ArrowDown") return { kind: "open" };
+    if (e.key === "ArrowUp") return { kind: "up" };
+    if (e.key === "a" || e.key === "A") return { kind: "all" };
+    return null;
+  }
+  const extend = e.shiftKey;
+  switch (e.key) {
+    case "ArrowDown":
+      return { kind: "move", step: 1, extend };
+    case "ArrowUp":
+      return { kind: "move", step: -1, extend };
+    case "PageDown":
+      return { kind: "page", step: 1, extend };
+    case "PageUp":
+      return { kind: "page", step: -1, extend };
+    case "Home":
+      return { kind: "edge", to: "start", extend };
+    case "End":
+      return { kind: "edge", to: "end", extend };
+  }
+  if (extend) return null;
+  if (e.key === "Enter") return { kind: "open" };
+  if (e.key === "Backspace") return { kind: "up" };
+  if (e.key === " ") return { kind: "space" };
+  return null;
+}
+
+export function isReloadKey(e: Pick<KeyMods, "key" | "metaKey" | "ctrlKey">): boolean {
+  return e.key === "F5" || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r");
+}
 
 export const MIN_PANE_PX = 260;
 

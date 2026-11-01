@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { formatBytes, formatDate } from "./format.ts";
   import FileList, { type Column } from "./FileList.svelte";
-  import { t } from "./i18n/index.ts";
+  import { errorText, t } from "./i18n/index.ts";
   import Icon from "./Icon.svelte";
   import Crumbs from "./Crumbs.svelte";
   import {
@@ -39,6 +39,7 @@
 
   const view = $derived(localView());
   const crumbs = $derived(localCrumbs(view.cwd));
+  const failure = $derived(localError());
 
   onMount(startLocal);
 
@@ -106,10 +107,10 @@
       <Crumbs {crumbs} onGo={(p) => { onActivate(); void goTo(p); }} onBlank={editPath} />
     {/if}
   </div>
-  {#if localError()}
+  {#if failure}
     <div class="banner" role="alert">
       <Icon name="alert" size={14} />
-      <span class="message">{localError()}</span>
+      <span class="message">{failure.path === null ? errorText(failure.code) : t("pane.listFailed", { name: failure.path, message: errorText(failure.code) })}</span>
       <button class="nav-btn" title={t("common.close")} tabindex="-1" onclick={dismissLocalError}><Icon name="close" size={12} /></button>
     </div>
   {/if}

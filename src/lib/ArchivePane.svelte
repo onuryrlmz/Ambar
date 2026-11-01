@@ -3,7 +3,7 @@
   import Crumbs from "./Crumbs.svelte";
   import FileList, { type Column } from "./FileList.svelte";
   import { formatBytes, formatCrc, formatDate, formatRatio } from "./format.ts";
-  import { t } from "./i18n/index.ts";
+  import { errorText, t } from "./i18n/index.ts";
   import Icon from "./Icon.svelte";
   import { activeModel, activeTab, allTabs, archiveError, closeTab, dismissArchiveError, focusTab, updateActive } from "./tabs.svelte.ts";
   import { archiveCrumbs, baseName, navigate, parentOf, toggleSort, type PaneView } from "./tabs-core.ts";
@@ -40,6 +40,7 @@
   let strip = $state<HTMLDivElement>();
 
   const tab = $derived(activeTab());
+  const openFailure = $derived(archiveError());
 
   // Keep the current tab in view when the strip overflows.
   $effect(() => {
@@ -139,10 +140,10 @@
     </div>
   {/if}
 
-  {#if archiveError()}
+  {#if openFailure}
     <div class="banner" role="alert">
       <Icon name="alert" size={14} />
-      <span class="message">{archiveError()}</span>
+      <span class="message">{t("archive.openFailed", { name: openFailure.name, message: errorText(openFailure.code) })}</span>
       <button class="nav-btn" title={t("common.close")} tabindex="-1" onclick={dismissArchiveError}><Icon name="close" size={12} /></button>
     </div>
   {/if}
@@ -218,6 +219,8 @@
     color: var(--ink);
   }
   .root.here {
+    flex-shrink: 0;
+    max-width: 100%;
     color: var(--ink);
     font-weight: 500;
   }

@@ -60,7 +60,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, lang: &str) -> tauri::Result<Menu<R
         .item(&item(app, "show", l("menu.show"), None)?)
         .item(&item(app, "info", l("menu.info"), Some("CmdOrCtrl+I"))?)
         .separator()
-        .item(&item(app, "close-tab", l("menu.closeTab"), Some("CmdOrCtrl+W"))?);
+        // The Mac menu owns Cmd+W. Elsewhere the page handles the key, or it would fire twice.
+        .item(&item(
+            app,
+            "close-tab",
+            l("menu.closeTab"),
+            cfg!(target_os = "macos").then_some("CmdOrCtrl+W"),
+        )?)
+        .item(&item(
+            app,
+            "close-window",
+            l("menu.closeWindow"),
+            Some("CmdOrCtrl+Shift+W"),
+        )?);
     if !cfg!(target_os = "macos") {
         file = file.separator().quit_with_text(l("menu.quit"));
     }
@@ -102,11 +114,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, lang: &str) -> tauri::Result<Menu<R
     }
     let view = view.build()?;
 
-    let mut help = SubmenuBuilder::new(app, l("menu.help"));
-    if !cfg!(target_os = "macos") {
-        help = help.item(&about);
-    }
-    let help = help.build()?;
+    let help = SubmenuBuilder::new(app, l("menu.help")).item(&about).build()?;
 
     let mut bar = MenuBuilder::new(app);
     if cfg!(target_os = "macos") {
@@ -144,7 +152,7 @@ mod tests {
     use super::*;
 
     const KEYS: &[&str] = &[
-        "menu.file", "menu.edit", "menu.view", "menu.help", "menu.open", "menu.closeTab",
+        "menu.file", "menu.edit", "menu.view", "menu.help", "menu.open", "menu.closeTab", "menu.closeWindow",
         "menu.extract", "menu.test", "menu.show", "menu.info", "menu.quit", "menu.undo",
         "menu.redo", "menu.cut", "menu.copy", "menu.paste", "menu.selectAll", "menu.refresh",
         "menu.language", "menu.langTr", "menu.langEn", "menu.fullscreen", "menu.minimize",
@@ -165,6 +173,7 @@ mod tests {
     fn labels_are_read_verbatim() {
         assert_eq!(parse_labels(TR)["menu.file"], "Dosya");
         assert_eq!(parse_labels(TR)["menu.quit"], "Ambar'dan Çık");
+        assert_eq!(parse_labels(TR)["menu.services"], "Hizmetler");
         assert_eq!(parse_labels(EN)["menu.file"], "File");
         assert!(!parse_labels(TR).contains_key("col.name"));
     }

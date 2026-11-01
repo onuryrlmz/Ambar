@@ -1,7 +1,6 @@
 // The left pane's folder. Module state, so it survives the page's `{#key lang}` re-render.
 
 import { homeDir, listLocal, parentDir, toArchiveError } from "./api.ts";
-import { errorText, t } from "./i18n/index.ts";
 import { sortNodes } from "./sort.ts";
 import * as core from "./tabs-core.ts";
 import type { LocalEntry, SortKey, TreeNode } from "./types.ts";
@@ -19,7 +18,8 @@ const toRow = (e: LocalEntry): LocalRow => ({
 let view = $state.raw(core.newView(""));
 let rows = $state.raw<LocalRow[]>([]);
 let sort = $state.raw<core.SortState>({ sortKey: "name", sortDir: "asc" });
-let listError = $state.raw<string | null>(null);
+// The code, not its text: the message must follow a language change.
+let listError = $state.raw<{ path: string | null; code: string } | null>(null);
 let started = false;
 let latest = 0;
 
@@ -40,11 +40,10 @@ export const toggleLocalSort = (key: SortKey) => {
 };
 
 /**
- * Shows `path`. If it cannot be listed the error shows in the pane, and the folder on
- * screen stays as it was, still usable. Only the newest of overlapping calls wins.
+ * Each call takes its number before its first await, and only the newest may touch
+ * state, so a slow Home or Up cannot override a later click.
  */
-export async function goTo(path: string, cameFrom?: string): Promise<void> {
-  const mine = ++latest;
+async function show(mine: number, path: string, cameFrom?: string): Promise<void> {
   try {
     const entries = await listLocal(path);
     if (mine !== latest) return;
@@ -53,24 +52,33 @@ export async function goTo(path: string, cameFrom?: string): Promise<void> {
     view = core.pruneSelection(view, model.indexOf);
     listError = null;
   } catch (e) {
-    if (mine !== latest) return;
-    listError = t("pane.listFailed", { name: path, message: errorText(toArchiveError(e).code) });
+    // The folder on screen stays as it was, still usable.
+    if (mine === latest) listError = { path, code: toArchiveError(e).code };
   }
 }
 
+export const goTo = (path: string, cameFrom?: string): Promise<void> => show(++latest, path, cameFrom);
+
 export async function goHome(): Promise<void> {
+  const mine = ++latest;
   try {
-    await goTo(await homeDir());
+    const home = await homeDir();
+    if (mine === latest) await show(mine, home);
   } catch (e) {
-    listError = errorText(toArchiveError(e).code);
+    if (mine === latest) listError = { path: null, code: toArchiveError(e).code };
   }
 }
 
 export async function goUp(): Promise<void> {
+  const mine = ++latest;
   const here = view.cwd;
   if (!here) return;
-  const parent = await parentDir(here);
-  if (parent !== null) await goTo(parent, here);
+  try {
+    const parent = await parentDir(here);
+    if (mine === latest && parent !== null) await show(mine, parent, here);
+  } catch (e) {
+    if (mine === latest) listError = { path: here, code: toArchiveError(e).code };
+  }
 }
 
 export const refreshLocal = () => (view.cwd ? goTo(view.cwd) : goHome());

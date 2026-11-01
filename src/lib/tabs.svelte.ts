@@ -1,13 +1,13 @@
 // The open archives. Module state, so it survives the page's `{#key lang}` re-render.
 
 import { openArchive, toArchiveError } from "./api.ts";
-import { errorText, t } from "./i18n/index.ts";
 import { sortNodes } from "./sort.ts";
 import * as core from "./tabs-core.ts";
 import { childrenOf } from "./tree.ts";
 
 let state = $state.raw(core.emptyTabs());
-let openError = $state.raw<string | null>(null);
+// The code, not its text: the banner must follow a language change.
+let openError = $state.raw<{ name: string; code: string } | null>(null);
 
 const active = $derived(state.tabs.find((t) => t.id === state.activeId) ?? null);
 
@@ -55,10 +55,12 @@ export async function openTab(path: string, password: string | null = null): Pro
     state = core.openedTab(state, tab.id, res);
     return state.activeId === tab.id;
   } catch (e) {
+    // Closed while loading: nobody is waiting for this archive any more.
+    if (!state.tabs.some((t) => t.id === tab.id)) return false;
     const wasActive = state.activeId === tab.id;
     state = core.closeTab(state, tab.id);
     if (wasActive && before !== null) state = core.focusTab(state, before);
-    openError = t("archive.openFailed", { name: core.baseName(path), message: errorText(toArchiveError(e).code) });
+    openError = { name: core.baseName(path), code: toArchiveError(e).code };
     return false;
   }
 }

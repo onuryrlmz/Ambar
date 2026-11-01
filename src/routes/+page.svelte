@@ -1,15 +1,17 @@
 <script lang="ts">
   import "$lib/theme.css";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { onMount, tick } from "svelte";
   import { setMenuLanguage } from "$lib/api.ts";
   import ArchivePane from "$lib/ArchivePane.svelte";
+  import { isMac } from "$lib/FileList.svelte";
   import { getLang, setLang, t, type Lang } from "$lib/i18n/index.ts";
   import LocalPane from "$lib/LocalPane.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
   import { activeTab, allTabs, closeTab, openTab } from "$lib/tabs.svelte.ts";
-  import { clampSplit, parseSplit } from "$lib/tabs-core.ts";
+  import { clampSplit, isReloadKey, parseSplit } from "$lib/tabs-core.ts";
   import Toolbar, { type ToolAction } from "$lib/Toolbar.svelte";
 
   const SPLIT_KEY = "ambar.split";
@@ -62,14 +64,11 @@
     for (const path of picked ?? []) await openArchiveFile(path);
   }
 
-  let lastClose = 0;
+  /** From the menu on the Mac, which owns Cmd+W there; from a key press elsewhere. */
   function closeCurrentTab() {
-    // Cmd+W can reach us twice: once as a key press and once through the menu.
-    const now = performance.now();
-    if (now - lastClose < 80) return;
-    lastClose = now;
     const tab = activeTab();
     if (tab) closeTab(tab.id);
+    else if (isMac()) void getCurrentWindow().close();
   }
 
   function changeLang(l: Lang) {
@@ -89,6 +88,9 @@
         break;
       case "close-tab":
         closeCurrentTab();
+        break;
+      case "close-window":
+        void getCurrentWindow().close();
         break;
       case "extract":
       case "test":
@@ -113,6 +115,12 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // A reload would wipe every open tab. Cmd+R is our own Yenile, so it still refreshes.
+    if (!import.meta.env.DEV && isReloadKey(e)) {
+      e.preventDefault();
+      void localPane?.refresh();
+      return;
+    }
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
     const mod = e.metaKey || e.ctrlKey;
     const key = e.key.toLowerCase();
@@ -120,7 +128,7 @@
       e.preventDefault();
       if (activePane === "local" && allTabs().length > 0) activate("archive");
       else if (activePane === "archive") activate("local");
-    } else if (mod && key === "w") {
+    } else if (mod && key === "w" && !isMac()) {
       e.preventDefault();
       closeCurrentTab();
     } else if (mod && key === "l") {
@@ -165,7 +173,13 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window
+  onkeydown={onKeydown}
+  oncontextmenu={(e) => {
+    // WebKit's default menu offers Reload, which would wipe every open tab.
+    if (!(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) e.preventDefault();
+  }}
+/>
 
 <!-- t() is not reactive: a language change rebuilds everything. Folder and tab state live in modules. -->
 {#key lang}
@@ -180,7 +194,7 @@
           onOpenFile={(p) => void openArchiveFile(p)}
         />
       </div>
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="splitter"
         role="separator"

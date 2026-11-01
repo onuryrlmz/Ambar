@@ -82,7 +82,8 @@
     background: var(--press);
   }
   .seg.last {
-    flex-shrink: 0.1;
+    flex-shrink: 0;
+    max-width: 60%;
     color: var(--ink);
     font-weight: 500;
   }

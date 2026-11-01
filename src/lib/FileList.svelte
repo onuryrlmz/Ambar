@@ -22,7 +22,7 @@
   import VirtualList from "./VirtualList.svelte";
 
   const ROW_H = 24;
-  const MIN_NAME = 170;
+  const MIN_NAME = 260;
   const INSET = 12;
 
   let {
@@ -98,22 +98,29 @@
     return k !== undefined && view.selection.has(k);
   };
 
+  /** The row to narrow the selection to if the press ends without a drag. */
+  let collapse: number | null = null;
+
   function press(e: MouseEvent, i: number) {
     if (e.button !== 0) return;
     onActivate();
-    const toggle = e.metaKey || e.ctrlKey;
-    const key = model.keys[i];
-    // A plain press on a row of a multi-selection keeps it, so a drag can take them all.
-    if (!toggle && !e.shiftKey && view.selection.has(key) && view.selection.size > 1) {
-      onView({ ...view, cursor: key, anchor: key });
-      return;
-    }
-    onView(core.selectClick(view, model.keys, i, { toggle, range: e.shiftKey }));
+    const pressed = core.pressRow(view, model, i, { toggle: e.metaKey || e.ctrlKey, range: e.shiftKey });
+    collapse = pressed.collapseOnRelease ? i : null;
+    onView(pressed.view);
+  }
+
+  function release(i: number) {
+    if (collapse === i) onView(core.selectClick(view, model, i, {}));
+    collapse = null;
   }
 
   function pressBlank(e: MouseEvent) {
     onActivate();
-    if ((e.target as Element).closest(".row")) return;
+    const target = e.target as Element;
+    if (target.closest(".row")) return;
+    // A press on a classic scrollbar lands on the scroller, beyond its client width.
+    const vl = body?.querySelector<HTMLElement>(".vl");
+    if (vl && e.clientX - vl.getBoundingClientRect().left >= vl.clientWidth) return;
     onView(core.clearSelection(view));
   }
 
@@ -125,7 +132,7 @@
 
   function moveAbs(i: number, extend: boolean) {
     if (model.keys.length === 0) return;
-    onView(core.moveTo(view, model.keys, i, extend));
+    onView(core.moveTo(view, model, i, extend));
     list?.scrollToIndex(Math.min(Math.max(0, i), model.keys.length - 1));
   }
 
@@ -144,58 +151,44 @@
 
   /** Returns whether the key was used. The page sends keys to the active pane. */
   export function handleKey(e: KeyboardEvent): boolean {
-    const mod = e.metaKey || e.ctrlKey;
-    const page = list?.pageSize() ?? 10;
-    switch (e.key) {
-      case "ArrowDown":
-        if (mod) {
-          const r = cursorRow();
-          if (r) onOpen(r);
-        } else moveBy(1, e.shiftKey);
-        return true;
-      case "ArrowUp":
-        if (mod) onUp();
-        else moveBy(-1, e.shiftKey);
-        return true;
-      case "PageDown":
-        moveBy(page, e.shiftKey);
-        return true;
-      case "PageUp":
-        moveBy(-page, e.shiftKey);
-        return true;
-      case "Home":
-        moveAbs(0, e.shiftKey);
-        return true;
-      case "End":
-        moveAbs(model.keys.length - 1, e.shiftKey);
-        return true;
-      case "Enter": {
+    const cmd = core.keyCommand(e);
+    if (!cmd) return false;
+    switch (cmd.kind) {
+      case "move":
+        moveBy(cmd.step, cmd.extend);
+        break;
+      case "page":
+        moveBy(cmd.step * (list?.pageSize() ?? 10), cmd.extend);
+        break;
+      case "edge":
+        moveAbs(cmd.to === "start" ? 0 : model.keys.length - 1, cmd.extend);
+        break;
+      case "open": {
         const r = cursorRow();
         if (r) onOpen(r);
-        return true;
+        break;
       }
-      case "Backspace":
+      case "up":
         onUp();
-        return true;
-      case " ": {
+        break;
+      case "space":
         if (isMac()) {
           const r = cursorRow();
           if (r) onSpace?.(r);
         } else if (view.cursor === null) moveBy(1, false);
         else onView(core.toggleCursor(view));
-        return true;
-      }
-      case "a":
-      case "A":
-        if (!mod) return false;
+        break;
+      case "all":
         selectEverything();
-        return true;
+        break;
     }
-    return false;
+    return true;
   }
 
   const sortIcon = $derived(sortDir === "asc" ? "sortUp" : "sortDown");
 </script>
+
+<svelte:window onmouseup={() => (collapse = null)} />
 
 <div class="list" class:active bind:clientWidth={width}>
   <div
@@ -235,6 +228,7 @@
             tabindex="-1"
             style:grid-template-columns={grid}
             onmousedown={(e) => press(e, i)}
+            onmouseup={(e) => e.button === 0 && release(i)}
             ondblclick={(e) => e.button === 0 && onOpen(r)}
           >
             <div class="cell name" title={r.name}>
@@ -344,28 +338,38 @@
     display: grid;
     height: 24px;
     align-items: center;
-    margin: 0 6px;
-    padding: 0 6px;
-    border-radius: 5px;
+    position: relative;
+    isolation: isolate;
+    padding: 0 12px;
     color: var(--ink);
     outline: none;
   }
-  .row.sel {
+  /* The highlight is inset, but the row is full width: its margins are still the row. */
+  .row::before {
+    content: "";
+    position: absolute;
+    inset: 0 6px;
+    z-index: -1;
+    border-radius: 5px;
+  }
+  .row.sel::before {
     background: var(--sel-idle);
   }
-  .row.joined-up {
+  .row.joined-up::before {
     border-top-left-radius: 0;
     border-top-right-radius: 0;
   }
-  .row.joined-down {
+  .row.joined-down::before {
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
   }
   .active .row.sel {
-    background: var(--sel);
     color: var(--sel-ink);
   }
-  .row.cursor {
+  .active .row.sel::before {
+    background: var(--sel);
+  }
+  .row.cursor::before {
     box-shadow: inset 0 0 0 1px var(--cursor-line);
   }
   .cell {

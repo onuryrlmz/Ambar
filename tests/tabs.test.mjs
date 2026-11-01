@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  archiveCrumbs, baseName, clampSplit, closeTab, emptyTabs, fitColumns, focusTab, isArchiveName, listModel, localCrumbs,
-  moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pruneSelection, rowKey, selectAll, selectClick,
-  selectedPaths, selectionSummary, toggleCursor, toggleSort, updateTab,
+  archiveCrumbs, baseName, clampSplit, closeTab, emptyTabs, fitColumns, focusTab, isArchiveName, isReloadKey,
+  keyCommand, listModel, localCrumbs, moveTo, navigate, newView, openTab, openedTab, parentOf, parseSplit, pressRow,
+  pruneSelection, rowKey, selectAll, selectClick, selectedPaths, selectionSummary, toggleCursor, toggleSort, updateTab,
 } from "../src/lib/tabs-core.ts";
+
+const list = (keys) => ({ keys, indexOf: new Map(keys.map((k, i) => [k, i])) });
 
 const row = (path, isDir = false, size = 1) => ({
   name: path.split("/").pop(), path, isDir, size, packed: null, modified: null, encrypted: false, crc: null,
@@ -56,7 +58,7 @@ test("tab ids are never reused, so a late open result cannot land on another tab
 });
 
 test("navigate into folder and back restores parent selection", () => {
-  const keys = ["d:docs", "f:a.txt", "f:b.txt"];
+  const keys = list(["d:docs", "f:a.txt", "f:b.txt"]);
   let v = newView("");
   v = selectClick(v, keys, 1, {});
   v = selectClick(v, keys, 2, { range: true });
@@ -113,7 +115,7 @@ test("a same-named file and folder are selected separately but pass as plain pat
 });
 
 test("click, toggle and range selection", () => {
-  const keys = ["a", "b", "c", "d"];
+  const keys = list(["a", "b", "c", "d"]);
   let v = selectClick(newView(""), keys, 1, {});
   assert.deepEqual([...v.selection], ["b"]);
   v = selectClick(v, keys, 3, { toggle: true });
@@ -128,7 +130,7 @@ test("click, toggle and range selection", () => {
 });
 
 test("keyboard moves clamp, and shift extends from the anchor", () => {
-  const keys = ["a", "b", "c"];
+  const keys = list(["a", "b", "c"]);
   let v = moveTo(newView(""), keys, -5, false);
   assert.equal(v.cursor, "a");
   v = moveTo(v, keys, 99, true);
@@ -139,7 +141,79 @@ test("keyboard moves clamp, and shift extends from the anchor", () => {
   v = moveTo(v, keys, 2, false);
   assert.deepEqual([...v.selection], ["c"]);
   const none = newView("");
-  assert.equal(moveTo(none, [], 1, false), none);
+  assert.equal(moveTo(none, list([]), 1, false), none);
+});
+
+test("extending a selection looks the anchor up in the map, never scanning the keys", () => {
+  const l = list(["a", "b", "c"]);
+  l.keys.indexOf = () => assert.fail("scanned the keys");
+  const v = selectClick(newView(""), l, 0, {});
+  assert.deepEqual([...selectClick(v, l, 2, { range: true }).selection], ["a", "b", "c"]);
+  assert.deepEqual([...moveTo(v, l, 1, true).selection], ["a", "b"]);
+});
+
+test("a plain press inside a multi-selection waits for the release, which collapses it", () => {
+  const l = list(["a", "b", "c"]);
+  const all = selectAll(newView(""), l.keys);
+  const p = pressRow(all, l, 1, {});
+  assert.equal(p.collapseOnRelease, true);
+  assert.equal(p.view.selection.size, 3, "kept during the press so a drag can take them all");
+  assert.equal(p.view.cursor, "b");
+  assert.deepEqual([...selectClick(p.view, l, 1, {}).selection], ["b"], "the release");
+});
+
+test("any other press applies at once and has nothing to do on release", () => {
+  const l = list(["a", "b", "c"]);
+  const all = selectAll(newView(""), l.keys);
+  const single = pressRow(selectClick(newView(""), l, 0, {}), l, 0, {});
+  assert.equal(single.collapseOnRelease, false);
+  assert.deepEqual([...single.view.selection], ["a"]);
+  const outside = pressRow(selectClick(newView(""), l, 0, {}), l, 2, {});
+  assert.equal(outside.collapseOnRelease, false);
+  assert.deepEqual([...outside.view.selection], ["c"]);
+  const toggled = pressRow(all, l, 1, { toggle: true });
+  assert.equal(toggled.collapseOnRelease, false);
+  assert.deepEqual([...toggled.view.selection], ["a", "c"]);
+  const ranged = pressRow({ ...all, anchor: "a" }, l, 1, { range: true });
+  assert.equal(ranged.collapseOnRelease, false);
+  assert.deepEqual([...ranged.view.selection], ["a", "b"]);
+});
+
+test("keys act only in their unmodified forms, Shift only where it extends", () => {
+  const k = (key, m = {}) => keyCommand({ key, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...m });
+  for (const key of ["Enter", "Backspace", " "]) {
+    assert.ok(k(key), key);
+    for (const m of [{ shiftKey: true }, { altKey: true }, { metaKey: true }, { ctrlKey: true }]) {
+      assert.equal(k(key, m), null, `${key} ${JSON.stringify(m)}`);
+    }
+  }
+  for (const key of ["Home", "End", "PageUp", "PageDown"]) {
+    assert.equal(k(key).extend, false, key);
+    assert.equal(k(key, { shiftKey: true }).extend, true, key);
+    for (const m of [{ altKey: true }, { metaKey: true }, { ctrlKey: true }]) {
+      assert.equal(k(key, m), null, `${key} ${JSON.stringify(m)}`);
+    }
+  }
+  assert.deepEqual(k("ArrowDown"), { kind: "move", step: 1, extend: false });
+  assert.deepEqual(k("ArrowUp", { shiftKey: true }), { kind: "move", step: -1, extend: true });
+  assert.deepEqual(k("ArrowDown", { metaKey: true }), { kind: "open" });
+  assert.deepEqual(k("ArrowUp", { ctrlKey: true }), { kind: "up" });
+  assert.equal(k("ArrowUp", { altKey: true }), null);
+  assert.equal(k("ArrowUp", { metaKey: true, shiftKey: true }), null);
+  assert.deepEqual(k("a", { metaKey: true }), { kind: "all" });
+  assert.deepEqual(k("A", { ctrlKey: true }), { kind: "all" });
+  assert.equal(k("a"), null);
+  assert.equal(k("a", { metaKey: true, shiftKey: true }), null);
+  assert.equal(k("x"), null);
+});
+
+test("reload shortcuts are recognized", () => {
+  const k = (key, m = {}) => isReloadKey({ key, metaKey: false, ctrlKey: false, ...m });
+  assert.ok(k("F5"));
+  assert.ok(k("r", { metaKey: true }));
+  assert.ok(k("R", { ctrlKey: true }));
+  assert.ok(!k("r"));
+  assert.ok(!k("F4"));
 });
 
 test("select all and toggling the cursor", () => {
