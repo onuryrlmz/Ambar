@@ -447,6 +447,7 @@ mod tests {
             path: path.into(),
             is_dir: false,
             size: 1,
+            size_unknown: false,
             packed: None,
             modified: None,
             crc: None,

@@ -39,3 +39,9 @@ test("crc and ratio sort keys, nulls last", () => {
     "ratio", "desc");
   assert.deepEqual(r.map((v) => v.name), ["a", "c", "b"]);
 });
+
+test("an unknown size sorts last in either direction", () => {
+  const rows = [{ ...n("u"), sizeUnknown: true }, n("a", false, 5), n("b", false, 9)];
+  assert.deepEqual(sortNodes(rows, "size", "asc").map((x) => x.name), ["a", "b", "u"]);
+  assert.deepEqual(sortNodes(rows, "size", "desc").map((x) => x.name), ["b", "a", "u"]);
+});

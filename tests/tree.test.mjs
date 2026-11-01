@@ -118,3 +118,12 @@ test("__proto__ and constructor segments are plain names", () => {
   assert.equal(childrenOf(idx, "__proto__/constructor")[0].size, 2);
   assert.equal(({}).polluted, undefined);
 });
+
+test("an unknown size stays unknown on the row and on the folders above it", () => {
+  const idx = buildIndex([f("a/b.txt", 0, null, { sizeUnknown: true }), f("c/d.txt", 3, null)]);
+  assert.equal(childrenOf(idx, "a")[0].sizeUnknown, true);
+  const root = childrenOf(idx, "");
+  assert.equal(root.find((x) => x.name === "a").sizeUnknown, true);
+  assert.ok(!root.find((x) => x.name === "c").sizeUnknown);
+  assert.ok(!childrenOf(idx, "c")[0].sizeUnknown);
+});

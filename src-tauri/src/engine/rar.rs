@@ -737,6 +737,7 @@ fn to_entry(h: &Header) -> Entry {
             .to_string(),
         is_dir: h.is_dir,
         size: if h.is_dir { 0 } else { h.unpacked_size },
+        size_unknown: false,
         packed: (!h.is_dir).then_some(h.packed_size),
         modified: h.mtime,
         // RAR5 stores a keyed hash instead of the CRC for encrypted files.

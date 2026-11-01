@@ -17,6 +17,11 @@ export function formatBytes(n: number): string {
   return `${s} ${UNITS[i]}`;
 }
 
+/** A row's size; a dash when the archive format does not say. */
+export function formatSize(row: { size: number; sizeUnknown?: boolean }): string {
+  return row.sizeUnknown ? "—" : formatBytes(row.size);
+}
+
 export function formatRatio(packed: number | null, size: number): string {
   if (packed === null || !(size > 0)) return "—";
   return `%${Math.round((packed / size) * 100)}`;

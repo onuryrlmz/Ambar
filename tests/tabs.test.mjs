@@ -380,3 +380,12 @@ test("the file list and the panes show names only through safeName", () => {
   assert.ok(!/title=\{(x|tab)\.path\}/.test(pane), "ArchivePane shows a raw archive path");
   assert.ok(!/name: failure\.path,/.test(read("LocalPane.svelte")), "LocalPane shows a raw path");
 });
+
+test("selectionSummary has no size when a selected row's size is unknown", () => {
+  const m = listModel([
+    { name: "a", path: "a", isDir: false, size: 5 },
+    { name: "u", path: "u", isDir: false, size: 0, sizeUnknown: true },
+  ]);
+  assert.deepEqual(selectionSummary(m, new Set(["f:a"])), { count: 1, size: 5 });
+  assert.deepEqual(selectionSummary(m, new Set(["f:a", "f:u"])), { count: 2, size: null });
+});

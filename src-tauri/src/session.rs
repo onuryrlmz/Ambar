@@ -342,7 +342,7 @@ mod tests {
     impl ArchiveEngine for WritingEngine {
         fn list(&mut self, _: Option<&Password>) -> Result<(ArchiveInfo, Vec<Entry>), ArchiveError> {
             let mk = |p: &str, d: bool| Entry {
-                path: p.into(), is_dir: d, size: 1, packed: None, modified: None, crc: None, encrypted: false,
+                path: p.into(), is_dir: d, size: 1, size_unknown: false, packed: None, modified: None, crc: None, encrypted: false,
             };
             Ok((
                 ArchiveInfo {
@@ -362,6 +362,7 @@ mod tests {
                 path: req.selection[0].clone(),
                 is_dir: false,
                 size: 1,
+                size_unknown: false,
                 packed: None,
                 modified: None,
                 crc: None,

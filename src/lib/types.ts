@@ -18,6 +18,8 @@ export interface Entry {
   path: string;
   isDir: boolean;
   size: number;
+  /** BZ2 and XZ: the format does not say, and `size` means nothing. */
+  sizeUnknown?: boolean;
   packed: number | null;
   /** Unix SECONDS. `formatDate` takes milliseconds: multiply by 1000. */
   modified: number | null;
@@ -99,6 +101,8 @@ export interface TreeNode {
   path: string;
   isDir: boolean;
   size: number;
+  /** On a folder: some file beneath it has no known size. */
+  sizeUnknown?: boolean;
   packed: number | null;
   /** Unix SECONDS, as in `Entry`. Null for synthesized folders. */
   modified: number | null;

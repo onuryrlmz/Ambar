@@ -245,18 +245,20 @@ export function fileToShow<R extends { isDir: boolean }>(view: SavedView, model:
 }
 
 export function selectionSummary(
-  model: ListModel<{ size: number }>,
+  model: ListModel<{ size: number; sizeUnknown?: boolean }>,
   selection: Set<string>,
-): { count: number; size: number } {
+): { count: number; size: number | null } {
   let count = 0;
   let size = 0;
+  let unknown = false;
   for (const k of selection) {
     const i = model.indexOf.get(k);
     if (i === undefined) continue;
     count++;
     size += model.rows[i].size;
+    unknown ||= !!model.rows[i].sizeUnknown;
   }
-  return { count, size };
+  return { count, size: unknown ? null : size };
 }
 
 export function toggleSort<V extends SortState>(v: V, key: SortKey): V {

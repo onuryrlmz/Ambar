@@ -75,7 +75,7 @@ function split(path: string): [string, string] {
 }
 
 /** Adds `sign * file` to every ancestor folder of `path` (creating them). */
-function applyToAncestors(index: ArchiveIndex, path: string, size: number, packed: number | null, sign: 1 | -1) {
+function applyToAncestors(index: ArchiveIndex, path: string, size: number, packed: number | null, sign: 1 | -1, sizeUnknown = false) {
   let parent = "";
   const parts = path.split("/");
   for (let i = 0; i < parts.length - 1; i++) {
@@ -85,6 +85,7 @@ function applyToAncestors(index: ArchiveIndex, path: string, size: number, packe
     if (packed === null) a.nullPacked += sign;
     else a.packedSum += sign * packed;
     a.node.packed = a.nullPacked > 0 ? null : a.packedSum;
+    if (sizeUnknown) a.node.sizeUnknown = true;
     parent = p;
   }
 }
@@ -115,12 +116,13 @@ export function buildIndex(entries: Entry[]): ArchiveIndex {
       node: {
         name, path, isDir: false, size: e.size, packed: e.packed,
         modified: e.modified, encrypted: e.encrypted, crc: e.crc,
+        ...(e.sizeUnknown ? { sizeUnknown: true } : {}),
       },
       packedSum: 0,
       nullPacked: 0,
       explicit: true,
     });
-    if (!deep) applyToAncestors(index, path, e.size, e.packed, 1);
+    if (!deep) applyToAncestors(index, path, e.size, e.packed, 1, e.sizeUnknown);
   }
   return index;
 }

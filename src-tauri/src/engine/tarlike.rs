@@ -14,7 +14,7 @@ use super::{
 };
 use crate::error::ArchiveError;
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -160,6 +160,34 @@ fn header_checksum_ok(block: &[u8; 512], h: &tar::Header) -> bool {
     h.cksum().is_ok_and(|c| c == sum)
 }
 
+/// What a gzip file says about its content without being decoded. For display and the
+/// extracted file's date only, nothing about safety rests on it: the size is the trailer
+/// of the last member, so a multi-member file shows only that member's.
+#[derive(Default)]
+struct GzFacts {
+    size: Option<u64>,
+    modified: Option<i64>,
+}
+
+fn gz_facts(path: &Path) -> io::Result<GzFacts> {
+    let mut f = File::open(path)?;
+    let mut head = [0u8; 10];
+    f.read_exact(&mut head)?;
+    // Header and trailer alone come to 18 bytes.
+    if head[..3] != [0x1f, 0x8b, 8] || f.metadata()?.len() < 18 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut trailer = [0u8; 4];
+    f.seek(SeekFrom::End(-4))?;
+    f.read_exact(&mut trailer)?;
+    // A time of zero means the header has none.
+    let time = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+    Ok(GzFacts {
+        size: Some(u32::from_le_bytes(trailer).into()),
+        modified: (time != 0).then_some(time.into()),
+    })
+}
+
 impl TarLikeEngine {
     pub fn new(path: &Path, format: Format) -> TarLikeEngine {
         TarLikeEngine {
@@ -221,12 +249,17 @@ impl TarLikeEngine {
         } else {
             name
         };
+        let facts = match self.format {
+            Format::Gz => gz_facts(&self.path).unwrap_or_default(),
+            _ => GzFacts::default(),
+        };
         Entry {
             path: name,
             is_dir: false,
-            size: 0,
+            size: facts.size.unwrap_or(0),
+            size_unknown: facts.size.is_none(),
             packed: None,
-            modified: None,
+            modified: facts.modified,
             crc: None,
             encrypted: false,
         }
@@ -399,6 +432,7 @@ impl TarLikeEngine {
                         Kind::Unsupported(_) if sparse => shown_size,
                         _ => 0,
                     },
+                    size_unknown: false,
                     packed: None,
                     modified: h.mtime().ok().map(|t| t as i64),
                     crc: None,
@@ -1356,10 +1390,7 @@ mod tests {
             let (info, es) = TarLikeEngine::new(&a, f).list(None).unwrap();
             assert_eq!(info.format, f);
             assert_eq!(es.len(), 1);
-            assert_eq!(
-                (es[0].path.as_str(), es[0].size, es[0].is_dir),
-                ("a.txt", 0, false)
-            );
+            assert_eq!((es[0].path.as_str(), es[0].is_dir), ("a.txt", false));
             let out = dir.path().join("out");
             let rep = TarLikeEngine::new(&a, f)
                 .extract(None, &req(&out), &mut ctl())
@@ -1386,6 +1417,65 @@ mod tests {
                 .unwrap();
             assert!(rep.failed.is_empty(), "{name}: {:?}", rep.failed);
             assert_eq!(leftovers(&out), [want.to_string()]);
+        }
+    }
+
+    fn dated_gz(d: &[u8], mtime: u32) -> Vec<u8> {
+        let mut e = flate2::GzBuilder::new()
+            .mtime(mtime)
+            .write(vec![], flate2::Compression::default());
+        e.write_all(d).unwrap();
+        e.finish().unwrap()
+    }
+
+    #[test]
+    fn gz_row_shows_the_header_time_and_trailer_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.txt.gz", &dated_gz(b"single stream", 1_650_000_000));
+        let es = TarLikeEngine::new(&a, Format::Gz).list(None).unwrap().1;
+        assert_eq!(
+            (es[0].size, es[0].size_unknown, es[0].modified),
+            (13, false, Some(1_650_000_000))
+        );
+        assert!(serde_json::to_value(&es[0]).unwrap().get("sizeUnknown").is_none());
+        // Zero means "no time" in a gzip header.
+        let a = write(dir.path(), "b.txt.gz", &dated_gz(b"x", 0));
+        let es = TarLikeEngine::new(&a, Format::Gz).list(None).unwrap().1;
+        assert_eq!((es[0].size, es[0].size_unknown, es[0].modified), (1, false, None));
+    }
+
+    #[test]
+    fn gz_extract_takes_the_header_time_when_there_is_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.txt.gz", &dated_gz(b"x", 1_650_000_000));
+        let out = dir.path().join("out");
+        TarLikeEngine::new(&a, Format::Gz).extract(None, &req(&out), &mut ctl()).unwrap();
+        assert_eq!(crate::engine::disk_mtime(&out.join("a.txt")), 1_650_000_000);
+        let a = write(dir.path(), "b.txt.gz", &dated_gz(b"x", 0));
+        TarLikeEngine::new(&a, Format::Gz).extract(None, &req(&out), &mut ctl()).unwrap();
+        assert!(crate::engine::disk_mtime(&out.join("b.txt")) > 1_650_000_000);
+    }
+
+    #[test]
+    fn bz2_and_xz_rows_say_their_size_is_unknown() {
+        for (f, name, body) in [(Format::Bz2, "a.txt.bz2", bz(b"x")), (Format::Xz, "a.txt.xz", xz(b"x"))] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = write(dir.path(), name, &body);
+            let es = TarLikeEngine::new(&a, f).list(None).unwrap().1;
+            assert!(es[0].size_unknown, "{f:?}");
+            assert_eq!(es[0].modified, None, "{f:?}");
+            assert_eq!(serde_json::to_value(&es[0]).unwrap()["sizeUnknown"], true, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn a_gz_too_short_for_a_trailer_lists_with_an_unknown_size() {
+        for body in [&[0x1f, 0x8b][..], &[0x1f, 0x8b, 8, 0, 1, 2, 3, 4, 0, 3, 9][..], b"not gzip at all, long enough"] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = write(dir.path(), "a.gz", body);
+            let es = TarLikeEngine::new(&a, Format::Gz).list(None).unwrap().1;
+            assert!(es[0].size_unknown, "{body:?}");
+            assert_eq!(es[0].modified, None, "{body:?}");
         }
     }
 

@@ -9,9 +9,9 @@
   // Two halves that line up with the panes above them.
   let { split, busy = false }: { split: number; busy?: boolean } = $props();
 
-  function describe(model: ListModel<{ size: number }>, view: PaneView): string {
+  function describe(model: ListModel<{ size: number; sizeUnknown?: boolean }>, view: PaneView): string {
     const s = selectionSummary(model, view.selection);
-    if (s.count > 0) return t("pane.selectedSize", { n: formatCount(s.count), size: formatBytes(s.size) });
+    if (s.count > 0) return t("pane.selectedSize", { n: formatCount(s.count), size: s.size === null ? "—" : formatBytes(s.size) });
     const n = model.rows.length;
     return t(n === 1 ? "pane.item" : "pane.items", { n: formatCount(n) });
   }

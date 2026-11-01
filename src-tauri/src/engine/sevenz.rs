@@ -141,6 +141,7 @@ impl SevenZEngine {
                             .to_string(),
                         is_dir: ae.is_directory,
                         size: if ae.is_directory { 0 } else { ae.size },
+                        size_unknown: false,
                         packed: None,
                         modified: ae.has_last_modified_date.then(|| {
                             (u64::from(ae.last_modified_date) / 10_000_000) as i64 - NT_TO_UNIX_SECS

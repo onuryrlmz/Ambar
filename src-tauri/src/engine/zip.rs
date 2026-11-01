@@ -66,6 +66,7 @@ impl ZipEngine {
                     path,
                     is_dir: f.is_dir(),
                     size: f.size(),
+                    size_unknown: false,
                     packed: Some(f.compressed_size()),
                     modified: f.last_modified().and_then(dos_to_epoch),
                     crc: Some(f.crc32()),

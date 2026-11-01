@@ -17,6 +17,9 @@ pub struct Entry {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
+    /// The format does not say without decoding it (BZ2, XZ): `size` means nothing. Shown as a dash.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub size_unknown: bool,
     /// Compressed bytes across all volumes. `None` for a RAR folder, and where the format
     /// has no per-entry size: 7z and the TAR family.
     pub packed: Option<u64>,

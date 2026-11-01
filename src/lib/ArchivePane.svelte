@@ -3,7 +3,7 @@
   import Crumbs from "./Crumbs.svelte";
   import type { OpenFailureText } from "./flows.ts";
   import FileList, { type Column } from "./FileList.svelte";
-  import { formatBytes, formatCrc, formatDate, formatRatio } from "./format.ts";
+  import { formatBytes, formatCrc, formatDate, formatRatio, formatSize } from "./format.ts";
   import { errorText, t } from "./i18n/index.ts";
   import Icon from "./Icon.svelte";
   import { safeName } from "./names.ts";
@@ -27,7 +27,7 @@
   } = $props();
 
   const columns: Column<TreeNode>[] = [
-    { key: "size", label: t("col.size"), width: 76, priority: 1, text: (r) => formatBytes(r.size) },
+    { key: "size", label: t("col.size"), width: 76, priority: 1, text: formatSize },
     {
       key: "packed", label: t("col.packed"), width: 76, priority: 3,
       text: (r) => (r.packed === null ? "—" : formatBytes(r.packed)),
